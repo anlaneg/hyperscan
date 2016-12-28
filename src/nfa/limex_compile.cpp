@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -80,9 +80,11 @@ struct precalcAccel {
     CharReach double_cr;
     flat_set<pair<u8, u8>> double_lits; /* double-byte accel stop literals */
     u32 double_offset;
+
+    MultibyteAccelInfo ma_info;
 };
 
-struct meteor_accel_info {
+struct limex_accel_info {
     ue2::unordered_set<NFAVertex> accelerable;
     map<NFAStateSet, precalcAccel> precalc;
     ue2::unordered_map<NFAVertex, flat_set<NFAVertex> > friends;
@@ -162,15 +164,13 @@ struct build_info {
     bool stateCompression;
     const CompileContext &cc;
     u32 num_states;
-    meteor_accel_info accel;
+    limex_accel_info accel;
 };
 
+#define LAST_LIMEX_NFA LIMEX_NFA_512
+
 // Constants for scoring mechanism
-
-#define LAST_LIMEX_NFA LIMEX_NFA_512_7
-
-const int LIMEX_INITIAL_SCORE = 2000;
-const int SHIFT_COST = 20; // limex: cost per shift mask
+const int SHIFT_COST = 10; // limex: cost per shift mask
 const int EXCEPTION_COST = 4; // limex: per exception
 
 template<NFAEngineType t> struct NFATraits { };
@@ -259,6 +259,17 @@ void maskSetBits(Mask &m, const NFAStateSet &bits) {
     }
 }
 
+template<class Mask>
+bool isMaskZero(Mask &m) {
+    u8 *m8 = (u8 *)&m;
+    for (u32 i = 0; i < sizeof(m); i++) {
+        if (m8[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Sets an entire byte in a mask to the given value
 template<class Mask>
 void maskSetByte(Mask &m, const unsigned int idx, const char val) {
@@ -334,12 +345,16 @@ void buildReachMapping(const build_info &args, vector<NFAStateSet> &reach,
 }
 
 struct AccelBuild {
-    AccelBuild() : v(NFAGraph::null_vertex()), state(0), offset(0) {}
+    AccelBuild() : v(NGHolder::null_vertex()), state(0), offset(0), ma_len1(0),
+            ma_len2(0), ma_type(MultibyteAccelInfo::MAT_NONE) {}
     NFAVertex v;
     u32 state;
     u32 offset; // offset correction to apply
     CharReach stop1; // single-byte accel stop literals
     flat_set<pair<u8, u8>> stop2; // double-byte accel stop literals
+    u32 ma_len1; // multiaccel len1
+    u32 ma_len2; // multiaccel len2
+    MultibyteAccelInfo::multiaccel_type ma_type; // multiaccel type
 };
 
 static
@@ -354,7 +369,12 @@ void findStopLiterals(const build_info &bi, NFAVertex v, AccelBuild &build) {
         build.stop1 = CharReach::dot();
     } else {
         const precalcAccel &precalc = bi.accel.precalc.at(ss);
-        if (precalc.double_lits.empty()) {
+        unsigned ma_len = precalc.ma_info.len1 + precalc.ma_info.len2;
+        if (ma_len >= MULTIACCEL_MIN_LEN) {
+            build.ma_len1 = precalc.ma_info.len1;
+            build.stop1 = precalc.ma_info.cr;
+            build.offset = precalc.ma_info.offset;
+        } else if (precalc.double_lits.empty()) {
             build.stop1 = precalc.single_cr;
             build.offset = precalc.single_offset;
         } else {
@@ -534,7 +554,7 @@ void filterAccelStates(NGHolder &g, const map<u32, NFAVertex> &tops,
 }
 
 static
-bool containsBadSubset(const meteor_accel_info &accel,
+bool containsBadSubset(const limex_accel_info &accel,
                        const NFAStateSet &state_set, const u32 effective_sds) {
     NFAStateSet subset(state_set.size());
     for (size_t j = state_set.find_first(); j != state_set.npos;
@@ -555,11 +575,29 @@ bool containsBadSubset(const meteor_accel_info &accel,
 }
 
 static
-void doAccelCommon(NGHolder &g,
-                   ue2::unordered_map<NFAVertex, AccelScheme> &accel_map,
-                   const ue2::unordered_map<NFAVertex, u32> &state_ids,
-                   const map<NFAVertex, BoundedRepeatSummary> &br_cyclic,
-                   const u32 num_states, meteor_accel_info *accel) {
+bool is_too_wide(const AccelScheme &as) {
+    return as.cr.count() > MAX_MERGED_ACCEL_STOPS;
+}
+
+static
+void fillAccelInfo(build_info &bi) {
+    if (!bi.do_accel) {
+        return;
+    }
+
+    NGHolder &g = bi.h;
+    limex_accel_info &accel = bi.accel;
+    unordered_map<NFAVertex, AccelScheme> &accel_map = accel.accel_map;
+    const map<NFAVertex, BoundedRepeatSummary> &br_cyclic = bi.br_cyclic;
+    const CompileContext &cc = bi.cc;
+    const unordered_map<NFAVertex, u32> &state_ids = bi.state_ids;
+    const u32 num_states = bi.num_states;
+
+    nfaFindAccelSchemes(g, br_cyclic, &accel_map);
+    filterAccelStates(g, bi.tops, &accel_map);
+
+    assert(accel_map.size() <= NFA_MAX_ACCEL_STATES);
+
     vector<CharReach> refined_cr = reduced_cr(g, br_cyclic);
 
     vector<NFAVertex> astates;
@@ -590,7 +628,7 @@ void doAccelCommon(NGHolder &g,
             }
         }
 
-        if (containsBadSubset(*accel, state_set, effective_sds)) {
+        if (containsBadSubset(accel, state_set, effective_sds)) {
             DEBUG_PRINTF("accel %u has bad subset\n", i);
             continue; /* if a subset failed to build we would too */
         }
@@ -598,30 +636,37 @@ void doAccelCommon(NGHolder &g,
         const bool allow_wide = allow_wide_accel(states, g, sds_or_proxy);
 
         AccelScheme as = nfaFindAccel(g, states, refined_cr, br_cyclic,
-                                      allow_wide);
-        if (as.cr.count() > MAX_MERGED_ACCEL_STOPS) {
+                                      allow_wide, true);
+        if (is_too_wide(as)) {
             DEBUG_PRINTF("accel %u too wide (%zu, %d)\n", i,
                          as.cr.count(), MAX_MERGED_ACCEL_STOPS);
             continue;
         }
 
-        DEBUG_PRINTF("accel %u ok with offset %u\n", i, as.offset);
+        DEBUG_PRINTF("accel %u ok with offset s%u, d%u\n", i, as.offset,
+                     as.double_offset);
 
-        precalcAccel &pa = accel->precalc[state_set];
-        pa.single_offset = as.offset;
-        pa.single_cr = as.cr;
+        // try multibyte acceleration first
+        MultibyteAccelInfo mai = nfaCheckMultiAccel(g, states, cc);
+
+        precalcAccel &pa = accel.precalc[state_set];
         useful |= state_set;
 
-        if (states.size() == 1) {
-            DoubleAccelInfo b = findBestDoubleAccelInfo(g, states.front());
-            if (pa.single_cr.count() > b.stop1.count()) {
-                /* insert this information into the precalc accel info as it is
-                 * better than the single scheme */
-                pa.double_offset = b.offset;
-                pa.double_lits = b.stop2;
-                pa.double_cr = b.stop1;
-            }
+        // if we successfully built a multibyte accel scheme, use that
+        if (mai.type != MultibyteAccelInfo::MAT_NONE) {
+            pa.ma_info = mai;
+
+            DEBUG_PRINTF("multibyte acceleration!\n");
+            continue;
         }
+
+        pa.single_offset = as.offset;
+        pa.single_cr = as.cr;
+        if (as.double_byte.size() != 0) {
+            pa.double_offset = as.double_offset;
+            pa.double_lits = as.double_byte;
+            pa.double_cr = as.double_cr;
+        };
     }
 
     for (const auto &m : accel_map) {
@@ -638,29 +683,20 @@ void doAccelCommon(NGHolder &g,
         state_set.reset();
         state_set.set(state_id);
 
-        auto p_it = accel->precalc.find(state_set);
-        if (p_it != accel->precalc.end()) {
+        bool is_multi = false;
+        auto p_it = accel.precalc.find(state_set);
+        if (p_it != accel.precalc.end()) {
             const precalcAccel &pa = p_it->second;
             offset = max(pa.double_offset, pa.single_offset);
+            is_multi = pa.ma_info.type != MultibyteAccelInfo::MAT_NONE;
             assert(offset <= MAX_ACCEL_DEPTH);
         }
 
-        accel->accelerable.insert(v);
-        findAccelFriends(g, v, br_cyclic, offset, &accel->friends[v]);
+        accel.accelerable.insert(v);
+        if (!is_multi) {
+            findAccelFriends(g, v, br_cyclic, offset, &accel.friends[v]);
+        }
     }
-}
-
-static
-void fillAccelInfo(build_info &bi) {
-    if (!bi.do_accel) {
-        return;
-    }
-
-    nfaFindAccelSchemes(bi.h, bi.br_cyclic, &bi.accel.accel_map);
-    filterAccelStates(bi.h, bi.tops, &bi.accel.accel_map);
-    assert(bi.accel.accel_map.size() <= NFA_MAX_ACCEL_STATES);
-    doAccelCommon(bi.h, bi.accel.accel_map, bi.state_ids, bi.br_cyclic,
-                  bi.num_states, &bi.accel);
 }
 
 /** The AccelAux structure has large alignment specified, and this makes some
@@ -672,7 +708,7 @@ static
 void buildAccel(const build_info &args, NFAStateSet &accelMask,
                 NFAStateSet &accelFriendsMask, AccelAuxVector &auxvec,
                 vector<u8> &accelTable) {
-    const meteor_accel_info &accel = args.accel;
+    const limex_accel_info &accel = args.accel;
 
     // Init, all zeroes.
     accelMask.resize(args.num_states);
@@ -737,8 +773,16 @@ void buildAccel(const build_info &args, NFAStateSet &accelMask,
 
         if (contains(accel.precalc, states)) {
             const precalcAccel &precalc = accel.precalc.at(states);
-            ainfo.single_offset = precalc.single_offset;
-            ainfo.single_stops = precalc.single_cr;
+            if (precalc.ma_info.type != MultibyteAccelInfo::MAT_NONE) {
+                ainfo.ma_len1 = precalc.ma_info.len1;
+                ainfo.ma_len2 = precalc.ma_info.len2;
+                ainfo.multiaccel_offset = precalc.ma_info.offset;
+                ainfo.multiaccel_stops = precalc.ma_info.cr;
+                ainfo.ma_type = precalc.ma_info.type;
+            } else {
+                ainfo.single_offset = precalc.single_offset;
+                ainfo.single_stops = precalc.single_cr;
+            }
         }
 
         buildAccelAux(ainfo, &aux);
@@ -964,7 +1008,8 @@ void findMaskedCompressionStates(const build_info &args,
     // Suffixes and outfixes can mask out leaf states, which should all be
     // accepts. Right now we can only do this when there is nothing in initDs,
     // as we switch that on unconditionally in the expand call.
-    if (generates_callbacks(h) && !hasInitDsStates(h, args.state_ids)) {
+    if (!inspects_states_for_accepts(h)
+        && !hasInitDsStates(h, args.state_ids)) {
         NFAStateSet nonleaf(args.num_states);
         for (const auto &e : edges_range(h)) {
             u32 from = args.state_ids.at(source(e, h));
@@ -1127,12 +1172,13 @@ u32 getReportListIndex(const flat_set<ReportID> &reports,
 }
 
 static
-void buildExceptionMap(const build_info &args,
-                       const ue2::unordered_set<NFAEdge> &exceptional,
-                       map<ExceptionProto, vector<u32> > &exceptionMap,
-                       vector<ReportID> &exceptionReports) {
+u32 buildExceptionMap(const build_info &args,
+                      const ue2::unordered_set<NFAEdge> &exceptional,
+                      map<ExceptionProto, vector<u32> > &exceptionMap,
+                      vector<ReportID> &exceptionReports) {
     const NGHolder &h = args.h;
     const u32 num_states = args.num_states;
+    u32 exceptionCount = 0;
 
     ue2::unordered_map<NFAVertex, u32> pos_trigger;
     ue2::unordered_map<NFAVertex, u32> tug_trigger;
@@ -1262,10 +1308,13 @@ void buildExceptionMap(const build_info &args,
             assert(e.succ_states.size() == num_states);
             assert(e.squash_states.size() == num_states);
             exceptionMap[e].push_back(i);
+            exceptionCount++;
         }
     }
 
-    DEBUG_PRINTF("%zu unique exceptions found.\n", exceptionMap.size());
+    DEBUG_PRINTF("%u exceptions found (%zu unique)\n", exceptionCount,
+                 exceptionMap.size());
+    return exceptionCount;
 }
 
 static
@@ -1280,31 +1329,98 @@ u32 depth_to_u32(const depth &d) {
     return d_val;
 }
 
+static
+bool isExceptionalTransition(const NGHolder &h, const NFAEdge &e,
+                             const build_info &args, u32 maxShift) {
+    NFAVertex from = source(e, h);
+    NFAVertex to = target(e, h);
+    u32 f = args.state_ids.at(from);
+    u32 t = args.state_ids.at(to);
+    if (!isLimitedTransition(f, t, maxShift)) {
+        return true;
+    }
+
+    // All transitions out of a tug trigger are exceptional.
+    if (contains(args.tugs, from)) {
+        return true;
+    }
+    return false;
+}
+
+static
+u32 findMaxVarShift(const build_info &args, u32 nShifts) {
+    const NGHolder &h = args.h;
+    u32 shiftMask = 0;
+    for (const auto &e : edges_range(h)) {
+        u32 from = args.state_ids.at(source(e, h));
+        u32 to = args.state_ids.at(target(e, h));
+        if (from == NO_STATE || to == NO_STATE) {
+            continue;
+        }
+        if (!isExceptionalTransition(h, e, args, MAX_SHIFT_AMOUNT)) {
+            shiftMask |= (1UL << (to - from));
+        }
+    }
+
+    u32 maxVarShift = 0;
+    for (u32 shiftCnt = 0; shiftMask != 0 && shiftCnt < nShifts; shiftCnt++) {
+        maxVarShift = findAndClearLSB_32(&shiftMask);
+    }
+
+    return maxVarShift;
+}
+
+static
+int getLimexScore(const build_info &args, u32 nShifts) {
+    const NGHolder &h = args.h;
+    u32 maxVarShift = nShifts;
+    int score = 0;
+
+    score += SHIFT_COST * nShifts;
+    maxVarShift = findMaxVarShift(args, nShifts);
+
+    NFAStateSet exceptionalStates(args.num_states);
+    for (const auto &e : edges_range(h)) {
+        u32 from = args.state_ids.at(source(e, h));
+        u32 to = args.state_ids.at(target(e, h));
+        if (from == NO_STATE || to == NO_STATE) {
+            continue;
+        }
+        if (isExceptionalTransition(h, e, args, maxVarShift)) {
+            exceptionalStates.set(from);
+        }
+    }
+    score += EXCEPTION_COST * exceptionalStates.count();
+    return score;
+}
+
+// This function finds the best shift scheme with highest score
+// Returns number of shifts and score calculated for appropriate scheme
+// Returns zero if no appropriate scheme was found
+static
+u32 findBestNumOfVarShifts(const build_info &args,
+                           int *bestScoreRet = nullptr) {
+    u32 bestNumOfVarShifts = 0;
+    int bestScore = INT_MAX;
+    for (u32 shiftCount = 1; shiftCount <= MAX_SHIFT_COUNT; shiftCount++) {
+        int score = getLimexScore(args, shiftCount);
+        if (score < bestScore) {
+            bestScore = score;
+            bestNumOfVarShifts = shiftCount;
+        }
+    }
+    if (bestScoreRet != nullptr) {
+        *bestScoreRet = bestScore;
+    }
+    return bestNumOfVarShifts;
+}
+
 template<NFAEngineType dtype>
 struct Factory {
     // typedefs for readability, for types derived from traits
     typedef typename NFATraits<dtype>::exception_t exception_t;
     typedef typename NFATraits<dtype>::implNFA_t implNFA_t;
     typedef typename NFATraits<dtype>::tableRow_t tableRow_t;
-
-    static
-    bool isExceptionalTransition(const NGHolder &h, const NFAEdge &e,
-                                 const ue2::unordered_map<NFAVertex, u32> &state_ids,
-                                 const ue2::unordered_set<NFAVertex> &tugs) {
-        NFAVertex from = source(e, h);
-        NFAVertex to = target(e, h);
-        u32 f = state_ids.at(from);
-        u32 t = state_ids.at(to);
-        if (!isLimitedTransition(f, t, NFATraits<dtype>::maxShift)) {
-            return true;
-        }
-
-        // All transitions out of a tug trigger are exceptional.
-        if (contains(tugs, from)) {
-            return true;
-        }
-        return false;
-    }
 
     static
     void allocState(NFA *nfa, u32 repeatscratchStateSize,
@@ -1397,8 +1513,7 @@ struct Factory {
             repeat->horizon = rsi.horizon;
             repeat->packedCtrlSize = rsi.packedCtrlSize;
             repeat->stateSize = rsi.stateSize;
-            memcpy(repeat->packedFieldSizes, rsi.packedFieldSizes.data(),
-                   byte_length(rsi.packedFieldSizes));
+            copy_bytes(repeat->packedFieldSizes, rsi.packedFieldSizes);
             repeat->patchCount = rsi.patchCount;
             repeat->patchSize = rsi.patchSize;
             repeat->encodingSize = rsi.encodingSize;
@@ -1413,8 +1528,7 @@ struct Factory {
             // Copy in the sparse lookup table.
             if (br.type == REPEAT_SPARSE_OPTIMAL_P) {
                 assert(!rsi.table.empty());
-                memcpy(info_ptr + tableOffset, rsi.table.data(),
-                       byte_length(rsi.table));
+                copy_bytes(info_ptr + tableOffset, rsi.table);
             }
 
             // Fill the tug mask.
@@ -1471,6 +1585,9 @@ struct Factory {
     static
     void writeShiftMasks(const build_info &args, implNFA_t *limex) {
         const NGHolder &h = args.h;
+        u32 maxShift = findMaxVarShift(args, limex->shiftCount);
+        u32 shiftMask = 0;
+        int shiftMaskIdx = 0;
 
         for (const auto &e : edges_range(h)) {
             u32 from = args.state_ids.at(source(e, h));
@@ -1482,15 +1599,32 @@ struct Factory {
             // We check for exceptional transitions here, as we don't want tug
             // trigger transitions emitted as limited transitions (even if they
             // could be in this model).
-            if (!isExceptionalTransition(h, e, args.state_ids, args.tugs)) {
-                maskSetBit(limex->shift[to - from], from);
+            if (!isExceptionalTransition(h, e, args, maxShift)) {
+                u32 shift = to - from;
+                if ((shiftMask & (1UL << shift)) == 0UL) {
+                    shiftMask |= (1UL << shift);
+                    limex->shiftAmount[shiftMaskIdx++] = (u8)shift;
+                }
+                assert(limex->shiftCount <= MAX_SHIFT_COUNT);
+                for (u32 i = 0; i < limex->shiftCount; i++) {
+                    if (limex->shiftAmount[i] == (u8)shift) {
+                        maskSetBit(limex->shift[i], from);
+                        break;
+                    }
+                }
+            }
+        }
+        if (maxShift && limex->shiftCount > 1) {
+            for (u32 i = 0; i < limex->shiftCount; i++) {
+                assert(!isMaskZero(limex->shift[i]));
             }
         }
     }
 
     static
     void findExceptionalTransitions(const build_info &args,
-                                    ue2::unordered_set<NFAEdge> &exceptional) {
+                                    ue2::unordered_set<NFAEdge> &exceptional,
+                                    u32 maxShift) {
         const NGHolder &h = args.h;
 
         for (const auto &e : edges_range(h)) {
@@ -1500,7 +1634,7 @@ struct Factory {
                 continue;
             }
 
-            if (isExceptionalTransition(h, e, args.state_ids, args.tugs)) {
+            if (isExceptionalTransition(h, e, args, maxShift)) {
                 exceptional.insert(e);
             }
         }
@@ -1512,19 +1646,25 @@ struct Factory {
                          implNFA_t *limex, const u32 exceptionsOffset) {
         DEBUG_PRINTF("exceptionsOffset=%u\n", exceptionsOffset);
 
-        // to make testing easier, we pre-set the exceptionMap to all invalid
-        // values
-        memset(limex->exceptionMap, 0xff, sizeof(limex->exceptionMap));
-
         exception_t *etable = (exception_t *)((char *)limex + exceptionsOffset);
         assert(ISALIGNED(etable));
 
-        u32 ecount = 0;
+        map<u32, ExceptionProto> exception_by_state;
         for (const auto &m : exceptionMap) {
             const ExceptionProto &proto = m.first;
             const vector<u32> &states = m.second;
-            DEBUG_PRINTF("exception %u, triggered by %zu states.\n", ecount,
-                         states.size());
+            for (u32 i : states) {
+                assert(!contains(exception_by_state, i));
+                exception_by_state.emplace(i, proto);
+            }
+        }
+
+        u32 ecount = 0;
+        for (const auto &m : exception_by_state) {
+            const ExceptionProto &proto = m.second;
+            u32 state_id = m.first;
+            DEBUG_PRINTF("exception %u, triggered by state %u\n", ecount,
+                         state_id);
 
             // Write the exception entry.
             exception_t &e = etable[ecount];
@@ -1538,13 +1678,10 @@ struct Factory {
                                     : repeatOffsets[proto.repeat_index];
             e.repeatOffset = repeat_offset;
 
-            // for each state that can switch it on
-            for (auto state_id : states) {
-                // set this bit in the exception mask
-                maskSetBit(limex->exceptionMask, state_id);
-                // set this index in the exception map
-                limex->exceptionMap[state_id] = ecount;
-            }
+            // for the state that can switch it on
+            // set this bit in the exception mask
+            maskSetBit(limex->exceptionMask, state_id);
+
             ecount++;
         }
 
@@ -1702,6 +1839,7 @@ struct Factory {
 
         for (u32 i = 0; i < num_repeats; i++) {
             repeatOffsets[i] = offset;
+            assert(repeats[i].first);
             memcpy((char *)limex + offset, repeats[i].first.get(),
                    repeats[i].second);
             offset += repeats[i].second;
@@ -1709,8 +1847,7 @@ struct Factory {
 
         // Write repeat offset lookup table.
         assert(ISALIGNED_N((char *)limex + repeatOffsetsOffset, alignof(u32)));
-        memcpy((char *)limex + repeatOffsetsOffset, repeatOffsets.data(),
-               byte_length(repeatOffsets));
+        copy_bytes((char *)limex + repeatOffsetsOffset, repeatOffsets);
 
         limex->repeatOffset = repeatOffsetsOffset;
         limex->repeatCount = num_repeats;
@@ -1725,8 +1862,7 @@ struct Factory {
         limex->exReportOffset = exceptionReportsOffset;
         assert(ISALIGNED_N((char *)limex + exceptionReportsOffset,
                            alignof(ReportID)));
-        memcpy((char *)limex + exceptionReportsOffset, reports.data(),
-               byte_length(reports));
+        copy_bytes((char *)limex + exceptionReportsOffset, reports);
     }
 
     static
@@ -1746,16 +1882,17 @@ struct Factory {
         }
 
         ue2::unordered_set<NFAEdge> exceptional;
-        findExceptionalTransitions(args, exceptional);
+        u32 shiftCount = findBestNumOfVarShifts(args);
+        assert(shiftCount);
+        u32 maxShift = findMaxVarShift(args, shiftCount);
+        findExceptionalTransitions(args, exceptional, maxShift);
 
         map<ExceptionProto, vector<u32> > exceptionMap;
         vector<ReportID> exceptionReports;
-        buildExceptionMap(args, exceptional, exceptionMap, exceptionReports);
+        u32 exceptionCount = buildExceptionMap(args, exceptional, exceptionMap,
+                                               exceptionReports);
 
-        if (exceptionMap.size() > ~0U) {
-            DEBUG_PRINTF("too many exceptions!\n");
-            return nullptr;
-        }
+        assert(exceptionCount <= args.num_states);
 
         // Build reach table and character mapping.
         vector<NFAStateSet> reach;
@@ -1810,7 +1947,7 @@ struct Factory {
 
         offset = ROUNDUP_CL(offset);
         const u32 exceptionsOffset = offset;
-        offset += sizeof(exception_t) * exceptionMap.size();
+        offset += sizeof(exception_t) * exceptionCount;
 
         const u32 exceptionReportsOffset = offset;
         offset += sizeof(ReportID) * exceptionReports.size();
@@ -1842,6 +1979,7 @@ struct Factory {
         writeAccepts(acceptMask, acceptEodMask, accepts, acceptsEod, squash,
                      limex, acceptsOffset, acceptsEodOffset, squashOffset);
 
+        limex->shiftCount = shiftCount;
         writeShiftMasks(args, limex);
 
         // Determine the state required for our state vector.
@@ -1875,8 +2013,6 @@ struct Factory {
     }
 
     static int score(const build_info &args) {
-        const NGHolder &h = args.h;
-
         // LimEx NFAs are available in sizes from 32 to 512-bit.
         size_t num_states = args.num_states;
 
@@ -1896,45 +2032,17 @@ struct Factory {
             sz = args.cc.grey.nfaForceSize;
         }
 
-        if (args.cc.grey.nfaForceShifts &&
-            NFATraits<dtype>::maxShift != args.cc.grey.nfaForceShifts) {
-            return -1;
-        }
-
         if (sz != NFATraits<dtype>::maxStates) {
             return -1; // fail, size not appropriate
         }
 
         // We are of the right size, calculate a score based on the number
         // of exceptions and the number of shifts used by this LimEx.
-        int score = LIMEX_INITIAL_SCORE;
-        if (NFATraits<dtype>::maxShift != 0) {
-            score -= SHIFT_COST / 2; // first shift mask is cheap
-            score -= SHIFT_COST * (NFATraits<dtype>::maxShift - 1);
+        int score;
+        u32 shiftCount = findBestNumOfVarShifts(args, &score);
+        if (shiftCount == 0) {
+            return -1;
         }
-
-        NFAStateSet exceptionalStates(num_states); // outbound exc trans
-
-        for (const auto &e : edges_range(h)) {
-            u32 from = args.state_ids.at(source(e, h));
-            u32 to = args.state_ids.at(target(e, h));
-            if (from == NO_STATE || to == NO_STATE) {
-                continue;
-            }
-
-            if (isExceptionalTransition(h, e, args.state_ids, args.tugs)) {
-                exceptionalStates.set(from);
-            }
-        }
-        DEBUG_PRINTF("%zu exceptional states\n", exceptionalStates.count());
-        score -= EXCEPTION_COST * exceptionalStates.count();
-
-        /* ensure that we always report a valid score if have the right number
-         * of states */
-        if (score < 0) {
-            score = 0;
-        }
-
         return score;
     }
 };
@@ -1953,50 +2061,19 @@ struct scoreNfa {
     }
 };
 
-#define MAKE_LIMEX_TRAITS(mlt_size, mlt_shift)                          \
-    template<> struct NFATraits<LIMEX_NFA_##mlt_size##_##mlt_shift> {   \
-        typedef LimExNFA##mlt_size implNFA_t;                           \
-        typedef u_##mlt_size tableRow_t;                                \
-        typedef NFAException##mlt_size exception_t;                     \
-        static const size_t maxStates = mlt_size;                       \
-        static const u32 maxShift = mlt_shift;                          \
-    };                                                                  \
+#define MAKE_LIMEX_TRAITS(mlt_size)                                            \
+    template<> struct NFATraits<LIMEX_NFA_##mlt_size> {                        \
+        typedef LimExNFA##mlt_size implNFA_t;                                  \
+        typedef u_##mlt_size tableRow_t;                                       \
+        typedef NFAException##mlt_size exception_t;                            \
+        static const size_t maxStates = mlt_size;                              \
+    };
 
-MAKE_LIMEX_TRAITS(32, 1)
-MAKE_LIMEX_TRAITS(32, 2)
-MAKE_LIMEX_TRAITS(32, 3)
-MAKE_LIMEX_TRAITS(32, 4)
-MAKE_LIMEX_TRAITS(32, 5)
-MAKE_LIMEX_TRAITS(32, 6)
-MAKE_LIMEX_TRAITS(32, 7)
-MAKE_LIMEX_TRAITS(128, 1)
-MAKE_LIMEX_TRAITS(128, 2)
-MAKE_LIMEX_TRAITS(128, 3)
-MAKE_LIMEX_TRAITS(128, 4)
-MAKE_LIMEX_TRAITS(128, 5)
-MAKE_LIMEX_TRAITS(128, 6)
-MAKE_LIMEX_TRAITS(128, 7)
-MAKE_LIMEX_TRAITS(256, 1)
-MAKE_LIMEX_TRAITS(256, 2)
-MAKE_LIMEX_TRAITS(256, 3)
-MAKE_LIMEX_TRAITS(256, 4)
-MAKE_LIMEX_TRAITS(256, 5)
-MAKE_LIMEX_TRAITS(256, 6)
-MAKE_LIMEX_TRAITS(256, 7)
-MAKE_LIMEX_TRAITS(384, 1)
-MAKE_LIMEX_TRAITS(384, 2)
-MAKE_LIMEX_TRAITS(384, 3)
-MAKE_LIMEX_TRAITS(384, 4)
-MAKE_LIMEX_TRAITS(384, 5)
-MAKE_LIMEX_TRAITS(384, 6)
-MAKE_LIMEX_TRAITS(384, 7)
-MAKE_LIMEX_TRAITS(512, 1)
-MAKE_LIMEX_TRAITS(512, 2)
-MAKE_LIMEX_TRAITS(512, 3)
-MAKE_LIMEX_TRAITS(512, 4)
-MAKE_LIMEX_TRAITS(512, 5)
-MAKE_LIMEX_TRAITS(512, 6)
-MAKE_LIMEX_TRAITS(512, 7)
+MAKE_LIMEX_TRAITS(32)
+MAKE_LIMEX_TRAITS(128)
+MAKE_LIMEX_TRAITS(256)
+MAKE_LIMEX_TRAITS(384)
+MAKE_LIMEX_TRAITS(512)
 
 } // namespace
 
@@ -2101,20 +2178,18 @@ aligned_unique_ptr<NFA> generate(NGHolder &h,
     // Acceleration analysis.
     fillAccelInfo(arg);
 
-    typedef pair<int, NFAEngineType> EngineScore;
-    vector<EngineScore> scores;
+    vector<pair<int, NFAEngineType>> scores;
 
     if (hint != INVALID_NFA) {
         // The caller has told us what to (attempt to) build.
-        scores.push_back(make_pair(0, (NFAEngineType)hint));
+        scores.emplace_back(0, (NFAEngineType)hint);
     } else {
         for (size_t i = 0; i <= LAST_LIMEX_NFA; i++) {
             NFAEngineType ntype = (NFAEngineType)i;
-
             int score = DISPATCH_BY_LIMEX_TYPE(ntype, scoreNfa, arg);
             if (score >= 0) {
                 DEBUG_PRINTF("%s scores %d\n", nfa_type_name(ntype), score);
-                scores.push_back(make_pair(score, ntype));
+                scores.emplace_back(score, ntype);
             }
         }
     }
@@ -2124,22 +2199,22 @@ aligned_unique_ptr<NFA> generate(NGHolder &h,
         return nullptr;
     }
 
-    sort(scores.begin(), scores.end(), greater<EngineScore>());
+    // Sort acceptable models in priority order, lowest score first.
+    sort(scores.begin(), scores.end());
 
-    aligned_unique_ptr<NFA> nfa;
-    for (auto i = scores.begin(); !nfa && i != scores.end(); ++i) {
-        assert(i->first >= 0);
-        nfa = DISPATCH_BY_LIMEX_TYPE(i->second, generateNfa, arg);
+    for (const auto &elem : scores) {
+        assert(elem.first >= 0);
+        NFAEngineType limex_model = elem.second;
+        auto nfa = DISPATCH_BY_LIMEX_TYPE(limex_model, generateNfa, arg);
+        if (nfa) {
+            DEBUG_PRINTF("successful build with NFA engine: %s\n",
+                         nfa_type_name(limex_model));
+            return nfa;
+        }
     }
 
-    if (!nfa) {
-        DEBUG_PRINTF("NFA build failed.\n");
-        return nullptr;
-    }
-
-    DEBUG_PRINTF("successful build with NFA engine: %s\n",
-                 nfa_type_name((NFAEngineType)nfa->type));
-    return nfa;
+    DEBUG_PRINTF("NFA build failed.\n");
+    return nullptr;
 }
 
 u32 countAccelStates(NGHolder &h,
@@ -2155,7 +2230,7 @@ u32 countAccelStates(NGHolder &h,
 
     if (!cc.grey.allowLimExNFA) {
         DEBUG_PRINTF("limex not allowed\n");
-        return NFA_MAX_ACCEL_STATES + 1;
+        return 0;
     }
 
     // Sanity check the input data.
@@ -2169,11 +2244,11 @@ u32 countAccelStates(NGHolder &h,
                   do_accel, state_compression, cc, num_states);
 
     // Acceleration analysis.
-    fillAccelInfo(bi);
+    nfaFindAccelSchemes(bi.h, bi.br_cyclic, &bi.accel.accel_map);
 
-    u32 num_accel = verify_u32(bi.accel.accelerable.size());
+    u32 num_accel = verify_u32(bi.accel.accel_map.size());
     DEBUG_PRINTF("found %u accel states\n", num_accel);
-    return min(num_accel, (u32)NFA_MAX_ACCEL_STATES);
+    return num_accel;
 }
 
 } // namespace ue2

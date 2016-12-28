@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -44,7 +44,6 @@ extern "C"
 #include "callback.h"
 #include "ue2common.h"
 
-struct hs_scratch;
 struct mq;
 struct NFA;
 
@@ -121,6 +120,16 @@ char nfaInitCompressedState(const struct NFA *nfa, u64a offset, void *state,
  */
 char nfaQueueExec(const struct NFA *nfa, struct mq *q, s64a end);
 
+/**
+ * Main execution function that doesn't perform the checks and optimisations of
+ * nfaQueueExec() and just dispatches directly to the nfa implementations. It is
+ * intended to be used by the Tamarama engine.
+ */
+char nfaQueueExec_raw(const struct NFA *nfa, struct mq *q, s64a end);
+
+/** Return value indicating that the engine is dead. */
+#define MO_DEAD 0
+
 /** Return value indicating that the engine is alive. */
 #define MO_ALIVE 1
 
@@ -157,6 +166,13 @@ char nfaQueueExec(const struct NFA *nfa, struct mq *q, s64a end);
 char nfaQueueExecToMatch(const struct NFA *nfa, struct mq *q, s64a end);
 
 /**
+ * Main execution function that doesn't perform the checks and optimisations of
+ * nfaQueueExecToMatch() and just dispatches directly to the nfa
+ * implementations. It is intended to be used by the Tamarama engine.
+ */
+char nfaQueueExec2_raw(const struct NFA *nfa, struct mq *q, s64a end);
+
+/**
  * Report matches at the current queue location.
  *
  * @param nfa the NFA to execute
@@ -177,9 +193,15 @@ char nfaReportCurrentMatches(const struct NFA *nfa, struct mq *q);
 char nfaInAcceptState(const struct NFA *nfa, ReportID report, struct mq *q);
 
 /**
+ * Returns non-zero if the NFA is in any accept state regardless of report
+ * ID.
+ */
+char nfaInAnyAcceptState(const struct NFA *nfa, struct mq *q);
+
+/**
  * Process the queued commands on the given NFA up to end or the first match.
  *
- * Note: This version is meant for rose prefix NFAs:
+ * Note: This version is meant for rose prefix/infix NFAs:
  *  - never uses a callback
  *  - loading of state at a point in history is not special cased
  *
@@ -188,8 +210,9 @@ char nfaInAcceptState(const struct NFA *nfa, ReportID report, struct mq *q);
  *        end with some variant of end. The location field of the events must
  *        be monotonically increasing. If not all the data was processed during
  *        the call, the queue is updated to reflect the remaining work.
- * @param report we are interested in, if set at the end of the scan returns
- *        @ref MO_MATCHES_PENDING
+ * @param report we are interested in. If the given report will be raised at
+ *        the end location, the function returns @ref MO_MATCHES_PENDING. If no
+ *        match information is desired, MO_INVALID_IDX should be passed in.
  * @return @ref MO_ALIVE if the nfa is still active with no matches pending,
  *         and @ref MO_MATCHES_PENDING if there are matches pending, 0 if not
  *         alive
@@ -205,22 +228,21 @@ char nfaQueueExecRose(const struct NFA *nfa, struct mq *q, ReportID report);
  * Runs an NFA in reverse from (buf + buflen) to buf and then from (hbuf + hlen)
  * to hbuf (main buffer and history buffer).
  *
+ * Note: provides the match location as the "end" offset when the callback is
+ * called.
+ *
  * @param nfa engine to run
  * @param offset base offset of buf
  * @param buf main buffer
  * @param buflen length of buf
  * @param hbuf history buf
  * @param hlen length of hbuf
- * @param scratch scratch
  * @param callback the callback to call for each match raised
  * @param context context pointer passed to each callback
- *
- * Note: is NOT reentrant
  */
 char nfaBlockExecReverse(const struct NFA *nfa, u64a offset, const u8 *buf,
                          size_t buflen, const u8 *hbuf, size_t hlen,
-                         struct hs_scratch *scratch, NfaCallback callback,
-                         void *context);
+                         NfaCallback callback, void *context);
 
 /**
  * Check whether the given NFA's state indicates that it is in one or more
@@ -233,13 +255,14 @@ char nfaBlockExecReverse(const struct NFA *nfa, u64a offset, const u8 *buf,
  *        (including br region)
  * @param offset the offset to return (via the callback) with each match
  * @param callback the callback to call for each match raised
- * @param som_cb the callback to call for each match raised (Haig)
  * @param context context pointer passed to each callback
+ *
+ * @return @ref MO_HALT_MATCHING if the user instructed us to halt, otherwise
+ *         @ref MO_CONTINUE_MATCHING.
  */
 char nfaCheckFinalState(const struct NFA *nfa, const char *state,
                         const char *streamState, u64a offset,
-                        NfaCallback callback, SomNfaCallback som_cb,
-                        void *context);
+                        NfaCallback callback, void *context);
 
 /**
  * Indicates if an engine is a zombie.

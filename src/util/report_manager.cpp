@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -128,11 +128,9 @@ vector<ReportID> ReportManager::getDkeyToReportTable() const {
 }
 
 void ReportManager::assignDkeys(const RoseBuild *rose) {
-    unique_ptr<RoseDedupeAux> dedupe = rose->generateDedupeAux();
-
     DEBUG_PRINTF("assigning...\n");
 
-    map<u32, set<ReportID>> ext_to_int;
+    map<u32, ue2::flat_set<ReportID>> ext_to_int;
 
     for (u32 i = 0; i < reportIds.size(); i++) {
         const Report &ir = reportIds[i];
@@ -142,6 +140,8 @@ void ReportManager::assignDkeys(const RoseBuild *rose) {
             ext_to_int[ir.onmatch].insert(i);
         }
     }
+
+    auto dedupe = rose->generateDedupeAux();
 
     for (const auto &m : ext_to_int) {
         u32 ext = m.first;
@@ -215,6 +215,18 @@ Report ReportManager::getBasicInternalReport(const NGWrapper &g, s32 adj) {
     }
 
     return makeECallback(g.reportId, adj, ekey);
+}
+
+void ReportManager::setProgramOffset(ReportID id, u32 programOffset) {
+    assert(id < reportIds.size());
+    assert(!contains(reportIdToProgramOffset, id));
+    reportIdToProgramOffset.emplace(id, programOffset);
+}
+
+u32 ReportManager::getProgramOffset(ReportID id) const {
+    assert(id < reportIds.size());
+    assert(contains(reportIdToProgramOffset, id));
+    return reportIdToProgramOffset.at(id);
 }
 
 static

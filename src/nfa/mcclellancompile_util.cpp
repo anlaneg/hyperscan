@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -228,13 +228,13 @@ void calc_min_dist_to_accept(const raw_dfa &raw,
     }
 }
 
-void prune_overlong(raw_dfa &raw, u32 max_offset) {
+bool prune_overlong(raw_dfa &raw, u32 max_offset) {
     DEBUG_PRINTF("pruning to at most %u\n", max_offset);
     vector<u32> bob_dist;
     u32 max_min_dist_bob = calc_min_dist_from_bob(raw, &bob_dist);
 
     if (max_min_dist_bob <= max_offset) {
-        return;
+        return false;
     }
 
     vector<vector<dstate_id_t> > in_edges;
@@ -282,6 +282,8 @@ void prune_overlong(raw_dfa &raw, u32 max_offset) {
     /* update specials */
     raw.start_floating = new_ids[raw.start_floating];
     raw.start_anchored = new_ids[raw.start_anchored];
+
+    return true;
 }
 
 set<ReportID> all_reports(const raw_dfa &rdfa) {
@@ -332,6 +334,38 @@ size_t hash_dfa(const raw_dfa &rdfa) {
     hash_combine(v, hash_dfa_no_reports(rdfa));
     hash_combine(v, all_reports(rdfa));
     return v;
+}
+
+static
+bool can_die_early(const raw_dfa &raw, dstate_id_t s,
+                   map<dstate_id_t, u32> &visited, u32 age_limit) {
+    if (contains(visited, s) && visited[s] >= age_limit) {
+        /* we have already visited (or are in the process of visiting) here with
+         * a looser limit. */
+        return false;
+    }
+    visited[s] = age_limit;
+
+    if (s == DEAD_STATE) {
+        return true;
+    }
+
+    if (age_limit == 0) {
+        return false;
+    }
+
+    for (const auto &next : raw.states[s].next) {
+        if (can_die_early(raw, next, visited, age_limit - 1)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool can_die_early(const raw_dfa &raw, u32 age_limit) {
+    map<dstate_id_t, u32> visited;
+    return can_die_early(raw, raw.start_anchored, visited, age_limit);
 }
 
 } // namespace ue2

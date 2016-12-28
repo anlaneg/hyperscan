@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -106,6 +106,12 @@ public:
                                  ROSE_BOUND_INF);
     }
 
+    /* for when there is a suffix graph which handles the reports */
+    static RoseInVertexProps makeAcceptEod() {
+        return RoseInVertexProps(RIV_ACCEPT_EOD, ue2_literal(), 0,
+                                 ROSE_BOUND_INF);
+    }
+
     static RoseInVertexProps makeStart(bool anchored) {
         DEBUG_PRINTF("making %s\n", anchored ? "anchored start" : "start");
         if (anchored) {
@@ -168,12 +174,6 @@ struct RoseInEdgeProps {
     std::shared_ptr<raw_som_dfa> haig;
 
     u32 graph_lag;
-
-    /** \brief Escape characters, can be used instead of graph.
-     *
-     * currently must not intersect with succ literal and must be a literal -
-     * literal edge, TODO: handle */
-    CharReach escapes;
 };
 
 typedef boost::adjacency_list<boost::listS, boost::listS, boost::bidirectionalS,

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -130,6 +130,9 @@ char repeatIsDead(const struct RepeatInfo *info,
         return lstate->ctrl.ring.offset == REPEAT_DEAD;
     case REPEAT_TRAILER:
         return lstate->ctrl.trailer.offset == REPEAT_DEAD;
+    case REPEAT_ALWAYS:
+        assert(!"REPEAT_ALWAYS should only be used by Castle");
+        return 0;
     }
 
     assert(0);
@@ -290,7 +293,7 @@ char lbrMatchLoop(const struct lbr_common *l, const u64a begin, const u64a end,
         }
 
         DEBUG_PRINTF("firing match at %llu\n", i);
-        if (cb(i, l->report, ctx) == MO_HALT_MATCHING) {
+        if (cb(0, i, l->report, ctx) == MO_HALT_MATCHING) {
             return MO_HALT_MATCHING;
         }
     }

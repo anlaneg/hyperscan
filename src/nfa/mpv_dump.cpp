@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -48,7 +48,8 @@
 
 namespace ue2 {
 
-void nfaExecMpv0_dumpDot(UNUSED const NFA *nfa, UNUSED FILE *file) {
+void nfaExecMpv0_dumpDot(UNUSED const NFA *nfa, UNUSED FILE *file,
+                         UNUSED const std::string &base) {
 }
 
 static really_inline
@@ -70,9 +71,9 @@ void dumpKilo(FILE *f, const mpv *m, const mpv_kilopuff *k) {
         break;
     case MPV_VERM:
         if (!ourisprint(k->u.verm.c)) {
-            fprintf(f, "verm 0x%hhu\n", k->u.verm.c);
+            fprintf(f, "verm 0x%02x\n", k->u.verm.c);
         } else {
-            fprintf(f, "verm 0x%hhu '%c'\n", k->u.verm.c, k->u.verm.c);
+            fprintf(f, "verm 0x%02x '%c'\n", k->u.verm.c, k->u.verm.c);
         }
         break;
     case MPV_SHUFTI:
@@ -87,9 +88,9 @@ void dumpKilo(FILE *f, const mpv *m, const mpv_kilopuff *k) {
         break;
     case MPV_NVERM:
         if (!ourisprint(k->u.verm.c)) {
-            fprintf(f, "nverm 0x%hhu\n", k->u.verm.c);
+            fprintf(f, "nverm 0x%02x\n", k->u.verm.c);
         } else {
-            fprintf(f, "nverm 0x%hhu '%c'\n", k->u.verm.c, k->u.verm.c);
+            fprintf(f, "nverm 0x%02x '%c'\n", k->u.verm.c, k->u.verm.c);
         }
         break;
     default:
@@ -108,6 +109,9 @@ void dumpKilo(FILE *f, const mpv *m, const mpv_kilopuff *k) {
         fprintf(f, "    Puffette %u\n", i);
         fprintf(f, "        repeats:   %u%s\n", p[i].repeats,
                 p[i].unbounded ? "," : "");
+        if (p[i].simple_exhaust) {
+            fprintf(f, "        simple exhaustible\n");
+        }
         fprintf(f, "        report id: %u\n", p[i].report);
     }
 

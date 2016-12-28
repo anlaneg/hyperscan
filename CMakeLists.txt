@@ -1,14 +1,20 @@
 cmake_minimum_required (VERSION 2.8.11)
+
+# don't use the built-in default configs
+set (CMAKE_NOT_USING_CONFIG_FLAGS TRUE)
+
 project (Hyperscan C CXX)
 
 set (HS_MAJOR_VERSION 4)
-set (HS_MINOR_VERSION 0)
-set (HS_PATCH_VERSION 1)
+set (HS_MINOR_VERSION 3)
+set (HS_PATCH_VERSION 2)
 set (HS_VERSION ${HS_MAJOR_VERSION}.${HS_MINOR_VERSION}.${HS_PATCH_VERSION})
 
-string (TIMESTAMP BUILD_DATE "%Y-%m-%d")
+# since we are doing this manually, we only have three types
+set (CMAKE_CONFIGURATION_TYPES "Debug;Release;RelWithDebInfo"
+     CACHE STRING "" FORCE)
 
-set(CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
+set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 include(CheckCCompilerFlag)
 include(CheckCXXCompilerFlag)
 INCLUDE (CheckFunctionExists)
@@ -24,7 +30,7 @@ find_package(PkgConfig QUIET)
 
 if (NOT CMAKE_BUILD_TYPE)
     message(STATUS "Default build type 'Release with debug info'")
-    set(CMAKE_BUILD_TYPE "RELWITHDEBINFO")
+    set(CMAKE_BUILD_TYPE RELWITHDEBINFO CACHE STRING "" FORCE )
 else()
     string(TOUPPER ${CMAKE_BUILD_TYPE} CMAKE_BUILD_TYPE)
     message(STATUS "Build type ${CMAKE_BUILD_TYPE}")
@@ -56,8 +62,9 @@ if(CMAKE_GENERATOR STREQUAL Xcode)
     set(XCODE TRUE)
 endif()
 
-include_directories(src .)
-include_directories(${CMAKE_BINARY_DIR})
+set(CMAKE_INCLUDE_CURRENT_DIR 1)
+include_directories(${PROJECT_SOURCE_DIR}/src)
+include_directories(${PROJECT_BINARY_DIR})
 include_directories(SYSTEM include)
 
 set(BOOST_USE_STATIC_LIBS OFF)
@@ -71,10 +78,10 @@ find_package(Boost ${BOOST_MINVERSION})
 if(NOT Boost_FOUND)
     # we might have boost in tree, so provide a hint and try again
     message(STATUS "trying include dir for boost")
-    set(BOOST_INCLUDEDIR "${CMAKE_SOURCE_DIR}/include")
+    set(BOOST_INCLUDEDIR "${PROJECT_SOURCE_DIR}/include")
     find_package(Boost ${BOOST_MINVERSION})
     if(NOT Boost_FOUND)
-        message(FATAL_ERROR "Boost ${BOOST_MINVERSION} or later not found. Either install system pacakges if available, extract Boost headers to ${CMAKE_SOURCE_DIR}/include, or set the CMake BOOST_ROOT variable.")
+        message(FATAL_ERROR "Boost ${BOOST_MINVERSION} or later not found. Either install system packages if available, extract Boost headers to ${CMAKE_SOURCE_DIR}/include, or set the CMake BOOST_ROOT variable.")
     endif()
 endif()
 
@@ -88,6 +95,18 @@ if(PYTHONINTERP_FOUND)
 else()
     message(FATAL_ERROR "No python interpreter found")
 endif()
+
+# allow for reproducible builds - python for portability
+if (DEFINED ENV{SOURCE_DATE_EPOCH})
+      execute_process(
+          COMMAND "${PYTHON}" "${CMAKE_MODULE_PATH}/formatdate.py" "$ENV{SOURCE_DATE_EPOCH}"
+          OUTPUT_VARIABLE BUILD_DATE
+          OUTPUT_STRIP_TRAILING_WHITESPACE)
+else ()
+    string (TIMESTAMP BUILD_DATE "%Y-%m-%d")
+endif ()
+message(STATUS "Build date: ${BUILD_DATE}")
+
 
 if(${RAGEL} STREQUAL "RAGEL-NOTFOUND")
     message(FATAL_ERROR "Ragel state machine compiler not found")
@@ -114,17 +133,13 @@ if (BUILD_STATIC_AND_SHARED OR BUILD_SHARED_LIBS)
 endif()
 
 #for config
-set(HS_OPTIMIZE OPTIMISE)
+if (OPTIMISE)
+    set(HS_OPTIMIZE ON)
+endif()
 
 CMAKE_DEPENDENT_OPTION(DUMP_SUPPORT "Dump code support; normally on, except in release builds" ON "NOT RELEASE_BUILD" OFF)
 
-option(DISABLE_ASSERTS "Disable assert(); enabled in debug builds, disabled in release builds" FALSE)
-
-if (DISABLE_ASSERTS)
-    if (CMAKE_BUILD_TYPE STREQUAL "DEBUG")
-        add_definitions(-DNDEBUG)
-    endif()
-endif()
+CMAKE_DEPENDENT_OPTION(DISABLE_ASSERTS "Disable assert(); Asserts are enabled in debug builds, disabled in release builds" OFF "NOT RELEASE_BUILD" ON)
 
 option(WINDOWS_ICC "Use Intel C++ Compiler on Windows, default off, requires ICC to be set in project" OFF)
 
@@ -136,18 +151,26 @@ if(MSVC OR MSVC_IDE)
     if (MSVC_VERSION LESS 1700)
         message(FATAL_ERROR "The project requires C++11 features.")
     else()
+        # set base flags
+        set(CMAKE_C_FLAGS "/DWIN32 /D_WINDOWS /W3")
+        set(CMAKE_C_FLAGS_DEBUG "/D_DEBUG /MDd /Zi /Od")
+        set(CMAKE_C_FLAGS_RELEASE "/MD /O2 /Ob2 /Oi")
+        set(CMAKE_C_FLAGS_RELWITHDEBINFO "/Zi /MD /O2 /Ob2 /Oi")
+
+        set(CMAKE_CXX_FLAGS "/DWIN32 /D_WINDOWS /W3 /GR /EHsc")
+        set(CMAKE_CXX_FLAGS_DEBUG "/D_DEBUG /MDd /Zi /Od")
+        set(CMAKE_CXX_FLAGS_RELEASE "/MD /O2 /Ob2 /Oi")
+        set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "/Zi /MD /O2 /Ob2 /Oi")
+
         if (WINDOWS_ICC)
-            set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /Qstd=c99 /Qrestrict /QxHost /O3 /wd4267 /Qdiag-disable:remark")
-            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Qstd=c++11 /Qrestrict /QxHost /O2 /wd4267 /wd4800 /Qdiag-disable:remark -DBOOST_DETAIL_NO_CONTAINER_FWD -D_SCL_SECURE_NO_WARNINGS")
+            set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /Qstd=c99 /Qrestrict /QxHost /wd4267 /Qdiag-disable:remark")
+            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Qstd=c++11 /Qrestrict /QxHost /wd4267 /wd4800 /Qdiag-disable:remark -DBOOST_DETAIL_NO_CONTAINER_FWD -D_SCL_SECURE_NO_WARNINGS")
         else()
             #TODO: don't hardcode arch
-            set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /arch:AVX /O2 /wd4267")
-            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /arch:AVX /O2 /wd4244 /wd4267 /wd4800 /wd2586 /wd1170 -DBOOST_DETAIL_NO_CONTAINER_FWD -D_SCL_SECURE_NO_WARNINGS")
+            set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /arch:AVX /wd4267")
+            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /arch:AVX /wd4244 /wd4267 /wd4800 /wd2586 /wd1170 -DBOOST_DETAIL_NO_CONTAINER_FWD -D_SCL_SECURE_NO_WARNINGS")
         endif()
-        string(REGEX REPLACE "/RTC1" ""
-            CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}" )
-        string(REGEX REPLACE "/RTC1" ""
-            CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}" )
+
 
     endif()
 
@@ -169,9 +192,33 @@ else()
         unset(_GXX_OUTPUT)
     endif()
 
+    if(OPTIMISE)
+        set(OPT_C_FLAG "-O3")
+        set(OPT_CXX_FLAG "-O2")
+    else()
+        set(OPT_C_FLAG "-O0")
+        set(OPT_CXX_FLAG "-O0")
+    endif(OPTIMISE)
+
+    # set up base flags for build types
+    set(CMAKE_C_FLAGS_DEBUG "-g ${OPT_C_FLAG} -Werror")
+    set(CMAKE_C_FLAGS_RELWITHDEBINFO "-g ${OPT_C_FLAG}")
+    set(CMAKE_C_FLAGS_RELEASE "${OPT_C_FLAG}")
+
+    set(CMAKE_CXX_FLAGS_DEBUG "-g ${OPT_CXX_FLAG} -Werror")
+    set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-g ${OPT_CXX_FLAG}")
+    set(CMAKE_CXX_FLAGS_RELEASE "${OPT_CXX_FLAG}")
+
+    if (DISABLE_ASSERTS)
+        # usually true for release builds, false for debug
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DNDEBUG")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DNDEBUG")
+    endif()
+
+
     # set compiler flags - more are tested and added later
-    set(EXTRA_C_FLAGS "-std=c99 -Wall -Wextra -Wshadow -Wcast-qual -Werror")
-    set(EXTRA_CXX_FLAGS "-std=c++11 -Wall -Wextra -Werror -Wno-shadow -Wswitch -Wreturn-type -Wcast-qual -Wno-deprecated -Wnon-virtual-dtor")
+    set(EXTRA_C_FLAGS "-std=c99 -Wall -Wextra -Wshadow -Wcast-qual -fno-strict-aliasing")
+    set(EXTRA_CXX_FLAGS "-std=c++11 -Wall -Wextra -Wshadow -Wswitch -Wreturn-type -Wcast-qual -Wno-deprecated -Wnon-virtual-dtor -fno-strict-aliasing")
 
     if (NOT CMAKE_C_FLAGS MATCHES .*march.*)
         message(STATUS "Building for current host CPU")
@@ -190,15 +237,7 @@ else()
         set(EXTRA_CXX_FLAGS "${EXTRA_CXX_FLAGS} -fabi-version=0 -Wno-unused-local-typedefs -Wno-maybe-uninitialized")
     endif()
 
-    if(OPTIMISE)
-        set(EXTRA_C_FLAGS "-O3 ${EXTRA_C_FLAGS}")
-        set(EXTRA_CXX_FLAGS "-O2 ${EXTRA_CXX_FLAGS}")
-    else()
-        set(EXTRA_C_FLAGS "-O0 ${EXTRA_C_FLAGS}")
-        set(EXTRA_CXX_FLAGS "-O0 ${EXTRA_CXX_FLAGS}")
-    endif(OPTIMISE)
-
-    if(NOT RELEASE_BUILD)
+    if (NOT(ARCH_IA32 AND RELEASE_BUILD))
         set(EXTRA_C_FLAGS "${EXTRA_C_FLAGS} -fno-omit-frame-pointer")
         set(EXTRA_CXX_FLAGS "${EXTRA_CXX_FLAGS} -fno-omit-frame-pointer")
     endif()
@@ -218,6 +257,18 @@ CHECK_FUNCTION_EXISTS(_aligned_malloc HAVE__ALIGNED_MALLOC)
 # these end up in the config file
 CHECK_C_COMPILER_FLAG(-fvisibility=hidden HAS_C_HIDDEN)
 CHECK_CXX_COMPILER_FLAG(-fvisibility=hidden HAS_CXX_HIDDEN)
+
+if (RELEASE_BUILD)
+    if (HAS_C_HIDDEN)
+        set(EXTRA_C_FLAGS "${EXTRA_C_FLAGS} -fvisibility=hidden")
+    endif()
+    if (HAS_CXX_HIDDEN)
+        set(EXTRA_CXX_FLAGS "${EXTRA_CXX_FLAGS} -fvisibility=hidden")
+    endif()
+endif()
+
+# ensure we are building for the right target arch
+include (${CMAKE_MODULE_PATH}/arch.cmake)
 
 # testing a builtin takes a little more work
 CHECK_C_SOURCE_COMPILES("void *aa_test(void *x) { return __builtin_assume_aligned(x, 16);}\nint main(void) { return 0; }" HAVE_CC_BUILTIN_ASSUME_ALIGNED)
@@ -276,6 +327,11 @@ if (CXX_UNUSED_CONST_VAR)
     set(EXTRA_CXX_FLAGS "${EXTRA_CXX_FLAGS} -Wno-unused-const-variable")
 endif()
 
+# gcc 6 complains about type attributes that get ignored, like alignment
+CHECK_CXX_COMPILER_FLAG("-Wignored-attributes" CXX_IGNORED_ATTR)
+if (CXX_IGNORED_ATTR)
+    set(EXTRA_CXX_FLAGS "${EXTRA_CXX_FLAGS} -Wno-ignored-attributes")
+endif()
 
 # note this for later
 # g++ doesn't have this flag but clang does
@@ -322,16 +378,23 @@ endif()
 add_subdirectory(util)
 add_subdirectory(unit)
 add_subdirectory(doc/dev-reference)
-if (EXISTS ${CMAKE_SOURCE_DIR}/tools)
+if (EXISTS ${CMAKE_SOURCE_DIR}/tools/CMakeLists.txt)
     add_subdirectory(tools)
 endif()
 
 # do substitutions
-configure_file(${CMAKE_MODULE_PATH}/config.h.in ${CMAKE_BINARY_DIR}/config.h)
-configure_file(src/hs_version.h.in hs_version.h)
+configure_file(${CMAKE_MODULE_PATH}/config.h.in ${PROJECT_BINARY_DIR}/config.h)
+configure_file(src/hs_version.h.in ${PROJECT_BINARY_DIR}/hs_version.h)
 
-if (PKG_CONFIG_FOUND)
-    # we really only need to do this if we have pkg-config
+if (NOT WIN32)
+    # expand out library names for pkgconfig static link info
+    foreach (LIB ${CMAKE_CXX_IMPLICIT_LINK_LIBRARIES})
+        # this is fragile, but protects us from toolchain specific files
+        if (NOT EXISTS ${LIB})
+            set(PRIVATE_LIBS "${PRIVATE_LIBS} -l${LIB}")
+        endif()
+    endforeach()
+
     configure_file(libhs.pc.in libhs.pc @ONLY) # only replace @ quoted vars
     install(FILES ${CMAKE_BINARY_DIR}/libhs.pc
             DESTINATION "${CMAKE_INSTALL_PREFIX}/lib/pkgconfig")
@@ -341,11 +404,6 @@ endif()
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${EXTRA_C_FLAGS}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${EXTRA_CXX_FLAGS}")
 
-
-# include the autogen targets
-add_subdirectory(src/fdr)
-
-include_directories(${CMAKE_BINARY_DIR}/src/fdr)
 
 if(NOT WIN32)
 set(RAGEL_C_FLAGS "-Wno-unused")
@@ -366,14 +424,13 @@ SET(hs_HEADERS
 )
 install(FILES ${hs_HEADERS} DESTINATION include/hs)
 
-set(fdr_autogen_targets autogen_runtime autogen_teddy_runtime)
-
 set (hs_exec_SRCS
     ${hs_HEADERS}
     src/hs_version.h
     src/ue2common.h
     src/alloc.c
     src/allocator.h
+    src/report.h
     src/runtime.c
     src/fdr/fdr.c
     src/fdr/fdr.h
@@ -384,7 +441,9 @@ set (hs_exec_SRCS
     src/fdr/flood_runtime.h
     src/fdr/fdr_loadval.h
     src/fdr/teddy.c
+    src/fdr/teddy.h
     src/fdr/teddy_internal.h
+    src/fdr/teddy_runtime_common.h
     src/hwlm/hwlm.c
     src/hwlm/hwlm.h
     src/hwlm/hwlm_internal.h
@@ -414,19 +473,37 @@ set (hs_exec_SRCS
     src/nfa/limex_simd128.c
     src/nfa/limex_simd256.c
     src/nfa/limex_simd384.c
-    src/nfa/limex_simd512a.c
-    src/nfa/limex_simd512b.c
-    src/nfa/limex_simd512c.c
+    src/nfa/limex_simd512.c
     src/nfa/limex.h
     src/nfa/limex_common_impl.h
     src/nfa/limex_context.h
     src/nfa/limex_internal.h
     src/nfa/limex_runtime.h
     src/nfa/limex_runtime_impl.h
+    src/nfa/limex_shuffle.h
     src/nfa/limex_state_impl.h
     src/nfa/mpv.h
     src/nfa/mpv.c
     src/nfa/mpv_internal.h
+    src/nfa/multiaccel_common.h
+    src/nfa/multiaccel_doubleshift.h
+    src/nfa/multiaccel_doubleshiftgrab.h
+    src/nfa/multiaccel_long.h
+    src/nfa/multiaccel_longgrab.h
+    src/nfa/multiaccel_shift.h
+    src/nfa/multiaccel_shiftgrab.h
+    src/nfa/multishufti.c
+    src/nfa/multishufti_avx2.h
+    src/nfa/multishufti_sse.h
+    src/nfa/multishufti.h
+    src/nfa/multitruffle.c
+    src/nfa/multitruffle_avx2.h
+    src/nfa/multitruffle_sse.h
+    src/nfa/multitruffle.h
+    src/nfa/multivermicelli.c
+    src/nfa/multivermicelli.h
+    src/nfa/multivermicelli_sse.h
+    src/nfa/multivermicelli_avx2.h
     src/nfa/nfa_api.h
     src/nfa/nfa_api_dispatch.c
     src/nfa/nfa_internal.h
@@ -434,20 +511,26 @@ set (hs_exec_SRCS
     src/nfa/repeat.c
     src/nfa/repeat.h
     src/nfa/repeat_internal.h
+    src/nfa/sheng.c
+    src/nfa/sheng.h
+    src/nfa/sheng_defs.h
+    src/nfa/sheng_impl.h
+    src/nfa/sheng_impl4.h
+    src/nfa/sheng_internal.h
+    src/nfa/shufti_common.h
     src/nfa/shufti.c
     src/nfa/shufti.h
+    src/nfa/tamarama.c
+    src/nfa/tamarama.h
+    src/nfa/tamarama_internal.h
+    src/nfa/truffle_common.h
     src/nfa/truffle.c
     src/nfa/truffle.h
     src/nfa/vermicelli.h
     src/nfa/vermicelli_run.h
     src/nfa/vermicelli_sse.h
-    src/sidecar/sidecar.c
-    src/sidecar/sidecar.h
-    src/sidecar/sidecar_generic.h
-    src/sidecar/sidecar_internal.h
-    src/sidecar/sidecar_shufti.c
-    src/sidecar/sidecar_shufti.h
     src/som/som.h
+    src/som/som_operation.h
     src/som/som_runtime.h
     src/som/som_runtime.c
     src/som/som_stream.c
@@ -455,7 +538,6 @@ set (hs_exec_SRCS
     src/rose/block.c
     src/rose/catchup.h
     src/rose/catchup.c
-    src/rose/eod.c
     src/rose/infix.h
     src/rose/init.h
     src/rose/init.c
@@ -463,18 +545,20 @@ set (hs_exec_SRCS
     src/rose/match.h
     src/rose/match.c
     src/rose/miracle.h
+    src/rose/program_runtime.c
+    src/rose/program_runtime.h
     src/rose/runtime.h
-    src/rose/rose_sidecar_runtime.h
     src/rose/rose.h
     src/rose/rose_internal.h
+    src/rose/rose_program.h
     src/rose/rose_types.h
     src/rose/rose_common.h
+    src/rose/validate_mask.h
     src/util/bitutils.h
     src/util/exhaust.h
     src/util/fatbit.h
     src/util/fatbit.c
     src/util/join.h
-    src/util/masked_move.c
     src/util/masked_move.h
     src/util/multibit.h
     src/util/multibit_internal.h
@@ -484,10 +568,8 @@ set (hs_exec_SRCS
     src/util/pqueue.h
     src/util/scatter.h
     src/util/scatter_runtime.h
-    src/util/shuffle.h
-    src/util/shuffle_ssse3.h
     src/util/simd_utils.h
-    src/util/simd_utils_ssse3.h
+    src/util/simd_utils.c
     src/util/state_compress.h
     src/util/state_compress.c
     src/util/unaligned.h
@@ -499,6 +581,14 @@ set (hs_exec_SRCS
     src/database.c
     src/database.h
 )
+
+if (HAVE_AVX2)
+    set (hs_exec_SRCS
+        ${hs_exec_SRCS}
+        src/fdr/teddy_avx2.c
+        src/util/masked_move.c
+        )
+endif ()
 
 
 SET (hs_SRCS
@@ -548,11 +638,15 @@ SET (hs_SRCS
     src/hwlm/noodle_build.h
     src/hwlm/noodle_internal.h
     src/nfa/accel.h
+    src/nfa/accel_dfa_build_strat.cpp
+    src/nfa/accel_dfa_build_strat.h
     src/nfa/accelcompile.cpp
     src/nfa/accelcompile.h
     src/nfa/callback.h
     src/nfa/castlecompile.cpp
     src/nfa/castlecompile.h
+    src/nfa/dfa_build_strat.cpp
+    src/nfa/dfa_build_strat.h
     src/nfa/dfa_min.cpp
     src/nfa/dfa_min.h
     src/nfa/goughcompile.cpp
@@ -573,6 +667,8 @@ SET (hs_SRCS
     src/nfa/mpv_internal.h
     src/nfa/mpvcompile.cpp
     src/nfa/mpvcompile.h
+    src/nfa/multiaccel_compilehelper.cpp
+    src/nfa/multiaccel_compilehelper.h
     src/nfa/nfa_api.h
     src/nfa/nfa_api_queue.h
     src/nfa/nfa_api_util.h
@@ -586,8 +682,13 @@ SET (hs_SRCS
     src/nfa/repeat_internal.h
     src/nfa/repeatcompile.cpp
     src/nfa/repeatcompile.h
+    src/nfa/sheng_internal.h
+    src/nfa/shengcompile.cpp
+    src/nfa/shengcompile.h
     src/nfa/shufticompile.cpp
     src/nfa/shufticompile.h
+    src/nfa/tamaramacompile.cpp
+    src/nfa/tamaramacompile.h
     src/nfa/trufflecompile.cpp
     src/nfa/trufflecompile.h
     src/nfagraph/ng.cpp
@@ -693,6 +794,8 @@ SET (hs_SRCS
     src/nfagraph/ng_util.h
     src/nfagraph/ng_vacuous.cpp
     src/nfagraph/ng_vacuous.h
+    src/nfagraph/ng_violet.cpp
+    src/nfagraph/ng_violet.h
     src/nfagraph/ng_width.cpp
     src/nfagraph/ng_width.h
     src/parser/AsciiComponentClass.cpp
@@ -752,8 +855,6 @@ SET (hs_SRCS
     src/parser/unsupported.h
     src/parser/utf8_validate.h
     src/parser/utf8_validate.cpp
-    src/sidecar/sidecar_compile.cpp
-    src/sidecar/sidecar_compile.h
     src/smallwrite/smallwrite_build.cpp
     src/smallwrite/smallwrite_build.h
     src/smallwrite/smallwrite_internal.h
@@ -761,6 +862,7 @@ SET (hs_SRCS
     src/som/slot_manager.h
     src/som/slot_manager_internal.h
     src/som/som.h
+    src/som/som_operation.h
     src/rose/rose_build.h
     src/rose/rose_build_add.cpp
     src/rose/rose_build_add_internal.h
@@ -768,14 +870,22 @@ SET (hs_SRCS
     src/rose/rose_build_anchored.cpp
     src/rose/rose_build_anchored.h
     src/rose/rose_build_bytecode.cpp
+    src/rose/rose_build_castle.h
+    src/rose/rose_build_castle.cpp
     src/rose/rose_build_compile.cpp
     src/rose/rose_build_convert.cpp
     src/rose/rose_build_convert.h
+    src/rose/rose_build_exclusive.cpp
+    src/rose/rose_build_exclusive.h
+    src/rose/rose_build_groups.cpp
+    src/rose/rose_build_groups.h
     src/rose/rose_build_impl.h
     src/rose/rose_build_infix.cpp
     src/rose/rose_build_infix.h
     src/rose/rose_build_lookaround.cpp
     src/rose/rose_build_lookaround.h
+    src/rose/rose_build_matchers.cpp
+    src/rose/rose_build_matchers.h
     src/rose/rose_build_merge.cpp
     src/rose/rose_build_merge.h
     src/rose/rose_build_misc.cpp
@@ -789,6 +899,7 @@ SET (hs_SRCS
     src/rose/rose_in_graph.h
     src/rose/rose_in_util.cpp
     src/rose/rose_in_util.h
+    src/util/accel_scheme.h
     src/util/alloc.cpp
     src/util/alloc.h
     src/util/bitfield.h
@@ -796,6 +907,8 @@ SET (hs_SRCS
     src/util/charreach.cpp
     src/util/charreach.h
     src/util/charreach_util.h
+    src/util/clique.cpp
+    src/util/clique.h
     src/util/compare.h
     src/util/compile_context.cpp
     src/util/compile_context.h
@@ -810,7 +923,6 @@ SET (hs_SRCS
     src/util/dump_mask.cpp
     src/util/dump_mask.h
     src/util/graph.h
-    src/util/internal_report.h
     src/util/multibit_build.cpp
     src/util/multibit_build.h
     src/util/order_check.h
@@ -818,12 +930,10 @@ SET (hs_SRCS
     src/util/partitioned_set.h
     src/util/popcount.h
     src/util/queue_index_factory.h
-    src/util/report.cpp
     src/util/report.h
     src/util/report_manager.cpp
     src/util/report_manager.h
     src/util/simd_utils.h
-    src/util/simd_utils_ssse3.h
     src/util/target_info.cpp
     src/util/target_info.h
     src/util/ue2_containers.h
@@ -861,11 +971,13 @@ set(hs_dump_SRCS
     src/nfa/nfa_dump_dispatch.cpp
     src/nfa/nfa_dump_internal.cpp
     src/nfa/nfa_dump_internal.h
+    src/nfa/shengdump.cpp
+    src/nfa/shengdump.h
+    src/nfa/tamarama_dump.cpp
+    src/nfa/tamarama_dump.h
     src/parser/dump.cpp
     src/parser/dump.h
     src/parser/position_dump.h
-    src/sidecar/sidecar_dump.cpp
-    src/sidecar/sidecar_dump.h
     src/smallwrite/smallwrite_dump.cpp
     src/smallwrite/smallwrite_dump.h
     src/som/slot_manager_dump.cpp
@@ -888,14 +1000,12 @@ endif()
 # choose which ones to build
 
 set (LIB_VERSION ${HS_VERSION})
-set (LIB_SOVERSION ${HS_MAJOR_VERSION}.${HS_MINOR_VERSION})
+set (LIB_SOVERSION ${HS_MAJOR_VERSION})
 
 add_library(hs_exec OBJECT ${hs_exec_SRCS})
-add_dependencies(hs_exec ${fdr_autogen_targets})
 
 if (BUILD_STATIC_AND_SHARED OR BUILD_SHARED_LIBS)
 add_library(hs_exec_shared OBJECT ${hs_exec_SRCS})
-add_dependencies(hs_exec_shared ${fdr_autogen_targets})
 set_target_properties(hs_exec_shared PROPERTIES
     POSITION_INDEPENDENT_CODE TRUE)
 endif()
@@ -919,14 +1029,16 @@ if (BUILD_STATIC_AND_SHARED OR BUILD_SHARED_LIBS)
         OUTPUT_NAME hs_runtime
         MACOSX_RPATH ON
         LINKER_LANGUAGE C)
-    install(TARGETS hs_runtime_shared DESTINATION lib)
+    install(TARGETS hs_runtime_shared
+        RUNTIME DESTINATION bin
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib)
 endif()
 
 # we want the static lib for testing
 add_library(hs STATIC ${hs_SRCS} $<TARGET_OBJECTS:hs_exec>)
 
 add_dependencies(hs ragel_Parser)
-add_dependencies(hs autogen_compiler autogen_teddy_compiler)
 
 if (NOT BUILD_SHARED_LIBS)
 install(TARGETS hs DESTINATION lib)
@@ -935,13 +1047,15 @@ endif()
 if (BUILD_STATIC_AND_SHARED OR BUILD_SHARED_LIBS)
     add_library(hs_shared SHARED ${hs_SRCS} $<TARGET_OBJECTS:hs_exec_shared>)
     add_dependencies(hs_shared ragel_Parser)
-    add_dependencies(hs_shared autogen_compiler autogen_teddy_compiler)
     set_target_properties(hs_shared PROPERTIES
         OUTPUT_NAME hs
         VERSION ${LIB_VERSION}
         SOVERSION ${LIB_SOVERSION}
         MACOSX_RPATH ON)
-install(TARGETS hs_shared DESTINATION lib)
+install(TARGETS hs_shared
+    RUNTIME DESTINATION bin
+    ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION lib)
 endif()
 
 if(NOT WIN32)

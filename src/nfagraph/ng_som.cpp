@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -266,7 +266,7 @@ bool validateEXSL(const NGHolder &g,
     const vector<CharReach> escapes_vec(1, escapes);
     const vector<CharReach> notescapes_vec(1, ~escapes);
 
-    set<NFAVertex> states;
+    ue2::flat_set<NFAVertex> states;
     /* turn on all states past the prefix */
     DEBUG_PRINTF("region %u is cutover\n", region);
     for (auto v : vertices_range(g)) {
@@ -276,20 +276,20 @@ bool validateEXSL(const NGHolder &g,
     }
 
     /* process the escapes */
-    execute_graph(g, escapes_vec, &states);
+    states = execute_graph(g, escapes_vec, states);
 
     /* flood with any number of not escapes */
-    set<NFAVertex> prev_states;
+    ue2::flat_set<NFAVertex> prev_states;
     while (prev_states != states) {
         prev_states = states;
-        execute_graph(g, notescapes_vec, &states);
+        states = execute_graph(g, notescapes_vec, states);
         insert(&states, prev_states);
     }
 
     /* find input starts to use for when we are running the prefix through as
      * when the escape character arrives we may be in matching the prefix
      * already */
-    set<NFAVertex> prefix_start_states;
+    ue2::flat_set<NFAVertex> prefix_start_states;
     for (auto v : vertices_range(prefix)) {
         if (v != prefix.accept && v != prefix.acceptEod
             /* and as we have already made it past the prefix once */
@@ -298,11 +298,12 @@ bool validateEXSL(const NGHolder &g,
         }
     }
 
-    execute_graph(prefix, escapes_vec, &prefix_start_states);
+    prefix_start_states =
+        execute_graph(prefix, escapes_vec, prefix_start_states);
 
     assert(contains(prefix_start_states, prefix.startDs));
     /* see what happens after we feed it the prefix */
-    execute_graph(g, prefix, prefix_start_states, &states);
+    states = execute_graph(g, prefix, prefix_start_states, states);
 
     for (auto v : states) {
         assert(v != g.accept && v != g.acceptEod); /* no cr -> should never be
@@ -383,7 +384,7 @@ makePrefix(const NGHolder &g, const ue2::unordered_map<NFAVertex, u32> &regions,
     add_edge(prefix.accept, prefix.acceptEod, prefix);
 
     assert(!next_enters.empty());
-    assert(next_enters.front() != NFAGraph::null_vertex());
+    assert(next_enters.front() != NGHolder::null_vertex());
     u32 dead_region = regions.at(next_enters.front());
     DEBUG_PRINTF("curr_region %u, dead_region %u\n",
                  regions.at(curr_exits.front()), dead_region);
@@ -444,8 +445,9 @@ void replaceTempSomSlot(ReportManager &rm, NGHolder &g, u32 real_slot) {
 }
 
 static
-void setPrefixReports(ReportManager &rm, NGHolder &g, u8 ir_type, u32 som_loc,
-                      const vector<DepthMinMax> &depths, bool prefix_by_rev) {
+void setPrefixReports(ReportManager &rm, NGHolder &g, ReportType ir_type,
+                      u32 som_loc, const vector<DepthMinMax> &depths,
+                      bool prefix_by_rev) {
     Report ir = makeCallback(0U, 0);
     ir.type = ir_type;
     ir.onmatch = som_loc;
@@ -469,7 +471,7 @@ void setPrefixReports(ReportManager &rm, NGHolder &g, u8 ir_type, u32 som_loc,
 }
 
 static
-void updatePrefixReports(ReportManager &rm, NGHolder &g, u8 ir_type) {
+void updatePrefixReports(ReportManager &rm, NGHolder &g, ReportType ir_type) {
     /* update the som action on the prefix report */
     for (auto v : inv_adjacent_vertices_range(g.accept, g)) {
         auto &reports = g[v].reports;
@@ -554,7 +556,8 @@ bool finalRegion(const NGHolder &g,
 
 static
 void replaceExternalReportsWithSomRep(ReportManager &rm, NGHolder &g,
-                                      NFAVertex v, u8 ir_type, u64a param) {
+                                      NFAVertex v, ReportType ir_type,
+                                      u64a param) {
     assert(!g[v].reports.empty());
 
     flat_set<ReportID> r_new;
@@ -2061,8 +2064,7 @@ sombe_rv doHaigLitSom(NG &ng, NGHolder &g, const NGWrapper &w, u32 comp_id,
     ReportManager &rm = ng.rm;
     SomSlotManager &ssm = ng.ssm;
 
-    // This approach relies on Rose.
-    if (!cc.grey.allowRose) {
+    if (!cc.grey.allowHaigLit) {
         return SOMBE_FAIL;
     }
 
@@ -2408,6 +2410,33 @@ bool splitOffBestLiteral(const NGHolder &g,
     return true;
 }
 
+/**
+ * Replace the given graph's EXTERNAL_CALLBACK reports with
+ * EXTERNAL_CALLBACK_SOM_PASS reports.
+ */
+void makeReportsSomPass(ReportManager &rm, NGHolder &g) {
+    for (const auto &v : vertices_range(g)) {
+        const auto &reports = g[v].reports;
+        if (reports.empty()) {
+            continue;
+        }
+
+        flat_set<ReportID> new_reports;
+        for (const ReportID &id : reports) {
+            const Report &report = rm.getReport(id);
+            if (report.type != EXTERNAL_CALLBACK) {
+                new_reports.insert(id);
+                continue;
+            }
+            Report report2 = report;
+            report2.type = EXTERNAL_CALLBACK_SOM_PASS;
+            new_reports.insert(rm.getInternalId(report2));
+        }
+
+        g[v].reports = new_reports;
+    }
+}
+
 static
 bool doLitHaigSom(NG &ng, NGHolder &g, som_type som) {
     ue2_literal lit;
@@ -2429,6 +2458,8 @@ bool doLitHaigSom(NG &ng, NGHolder &g, som_type som) {
     }
 
     assert(lit.length() <= MAX_MASK2_WIDTH || !mixed_sensitivity(lit));
+
+    makeReportsSomPass(ng.rm, *rhs);
 
     dumpHolder(*rhs, 91, "lithaig_rhs", ng.cc.grey);
 
@@ -2492,6 +2523,8 @@ bool doHaigLitHaigSom(NG &ng, NGHolder &g,
         return false; /* TODO: handle */
     }
 
+    makeReportsSomPass(ng.rm, *rhs);
+
     dumpHolder(*lhs, 92, "haiglithaig_lhs", ng.cc.grey);
     dumpHolder(*rhs, 93, "haiglithaig_rhs", ng.cc.grey);
 
@@ -2503,7 +2536,7 @@ bool doHaigLitHaigSom(NG &ng, NGHolder &g,
     RoseInVertex v = add_vertex(RoseInVertexProps::makeLiteral(lit), ig);
 
     bool lhs_all_vac = true;
-    NFAGraph::adjacency_iterator ai, ae;
+    NGHolder::adjacency_iterator ai, ae;
     for (tie(ai, ae) = adjacent_vertices(lhs->startDs, *lhs);
          ai != ae && lhs_all_vac; ++ai) {
         if (!is_special(*ai, *lhs)) {
@@ -2626,6 +2659,8 @@ bool doMultiLitHaigSom(NG &ng, NGHolder &g, som_type som) {
         DEBUG_PRINTF("no literal\n");
         return false;
     }
+
+    makeReportsSomPass(ng.rm, *rhs);
 
     dumpHolder(*rhs, 91, "lithaig_rhs", ng.cc.grey);
 

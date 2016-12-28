@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -26,7 +26,6 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "fdr.h"
 #include "fdr_internal.h"
 #include "fdr_confirm.h"
 #include "fdr_compile_internal.h"
@@ -70,7 +69,7 @@ static
 void updateFloodSuffix(vector<FDRFlood> &tmpFlood, u8 c, u32 suffix) {
     FDRFlood &fl = tmpFlood[c];
     fl.suffix = MAX(fl.suffix, suffix + 1);
-    DEBUG_PRINTF("Updated Flood Suffix for char '%c' to %u\n", c, fl.suffix);
+    DEBUG_PRINTF("Updated Flood Suffix for char 0x%02x to %u\n", c, fl.suffix);
 }
 
 static
@@ -91,8 +90,9 @@ void addFlood(vector<FDRFlood> &tmpFlood, u8 c, const hwlmLiteral &lit,
    }
 }
 
-pair<u8 *, size_t> setupFDRFloodControl(const vector<hwlmLiteral> &lits,
-                                        const EngineDescription &eng) {
+pair<aligned_unique_ptr<u8>, size_t>
+setupFDRFloodControl(const vector<hwlmLiteral> &lits,
+                     const EngineDescription &eng) {
     vector<FDRFlood> tmpFlood(N_CHARS);
     u32 default_suffix = eng.getDefaultFloodSuffixLength();
 
@@ -125,8 +125,9 @@ pair<u8 *, size_t> setupFDRFloodControl(const vector<hwlmLiteral> &lits,
         for (u32 i = 0; i < iEnd; i++) {
             if (i < litSize) {
                 if (isDifferent(c, lit.s[litSize - i - 1], lit.nocase)) {
-                    DEBUG_PRINTF("non-flood char in literal[%u] %c != %c\n",
-                                                i, c, lit.s[litSize - i - 1]);
+                    DEBUG_PRINTF("non-flood char in literal[%u]: "
+                                 "0x%02x != 0x%02x\n",
+                                 i, c, lit.s[litSize - i - 1]);
                     upSuffix = MIN(upSuffix, i);
                     loSuffix = MIN(loSuffix, i); // makes sense only for case-less
                     break;
@@ -196,11 +197,12 @@ pair<u8 *, size_t> setupFDRFloodControl(const vector<hwlmLiteral> &lits,
     size_t floodHeaderSize = sizeof(u32) * N_CHARS;
     size_t floodStructSize = sizeof(FDRFlood) * nDistinctFloods;
     size_t totalSize = ROUNDUP_16(floodHeaderSize + floodStructSize);
-    u8 *buf = (u8 *)aligned_zmalloc(totalSize);
+
+    auto buf = aligned_zmalloc_unique<u8>(totalSize);
     assert(buf); // otherwise would have thrown std::bad_alloc
 
-    u32 *floodHeader = (u32 *)buf;
-    FDRFlood *layoutFlood = (FDRFlood * )(buf + floodHeaderSize);
+    u32 *floodHeader = (u32 *)buf.get();
+    FDRFlood *layoutFlood = (FDRFlood *)(buf.get() + floodHeaderSize);
 
     u32 currentFloodIndex = 0;
     for (const auto &m : flood2chars) {
@@ -216,7 +218,7 @@ pair<u8 *, size_t> setupFDRFloodControl(const vector<hwlmLiteral> &lits,
     DEBUG_PRINTF("made a flood structure with %zu + %zu = %zu\n",
                  floodHeaderSize, floodStructSize, totalSize);
 
-    return make_pair((u8 *)buf, totalSize);
+    return {move(buf), totalSize};
 }
 
 } // namespace ue2

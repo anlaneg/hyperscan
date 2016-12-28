@@ -193,7 +193,9 @@ static const RepeatTestInfo repeatTests[] = {
     { REPEAT_FIRST, 100, depth::infinity() },
     { REPEAT_FIRST, 1000, depth::infinity() },
     { REPEAT_FIRST, 3000, depth::infinity() },
-    { REPEAT_FIRST, 10000, depth::infinity() }
+    { REPEAT_FIRST, 10000, depth::infinity() },
+    // {,} repeats -- always
+    { REPEAT_ALWAYS, 0, depth::infinity() },
 };
 
 INSTANTIATE_TEST_CASE_P(Repeat, RepeatTest, ValuesIn(repeatTests));
@@ -289,6 +291,10 @@ TEST_P(RepeatTest, FillRing) {
 
 TEST_P(RepeatTest, FindTops) {
     SCOPED_TRACE(testing::Message() << "Repeat: " << info);
+    /* REPEAT_ALWAYS has no state and so does not track top locations */
+    if (info.type == REPEAT_ALWAYS) {
+        return;
+    }
 
     repeatStore(&info, ctrl, state, 1000, 0);
     ASSERT_EQ(1000, repeatLastTop(&info, ctrl, state));
@@ -364,7 +370,8 @@ TEST_P(RepeatTest, TwoTops) {
     SCOPED_TRACE(testing::Message() << "Repeat: " << info);
 
     // Only appropriate for tests that store more than one top.
-    if (info.type == REPEAT_FIRST || info.type == REPEAT_LAST) {
+    if (info.type == REPEAT_FIRST || info.type == REPEAT_LAST
+        || info.type == REPEAT_ALWAYS) {
         return;
     }
 
@@ -448,6 +455,25 @@ TEST_P(RepeatTest, Pack) {
     }
 }
 
+TEST_P(RepeatTest, LargeGap) {
+    SCOPED_TRACE(testing::Message() << "Repeat: " << info);
+
+    if (info.repeatMax == REPEAT_INF) {
+        return; // Test not valid for FIRST-type repeats.
+    }
+
+    for (int i = 0; i < 64; i++) {
+        u64a top1 = 1000;
+        repeatStore(&info, ctrl, state, top1, 0); // first top
+        ASSERT_EQ(top1, repeatLastTop(&info, ctrl, state));
+
+        // Add a second top after a gap of 2^i bytes.
+        u64a top2 = top1 + (1ULL << i);
+        repeatStore(&info, ctrl, state, top2, 1); // second top
+        ASSERT_EQ(top2, repeatLastTop(&info, ctrl, state));
+    }
+}
+
 static
 const u32 sparsePeriods[] = {
     2,
@@ -505,6 +531,7 @@ const RepeatTestInfo sparseRepeats[] = {
     { REPEAT_SPARSE_OPTIMAL_P, 4000, 4000 },
     { REPEAT_SPARSE_OPTIMAL_P, 4500, 4500 },
     { REPEAT_SPARSE_OPTIMAL_P, 5000, 5000 },
+    { REPEAT_SPARSE_OPTIMAL_P, 65534, 65534 },
     // {N, M} repeats
     { REPEAT_SPARSE_OPTIMAL_P, 10, 20 },
     { REPEAT_SPARSE_OPTIMAL_P, 20, 40 },
@@ -528,7 +555,8 @@ const RepeatTestInfo sparseRepeats[] = {
     { REPEAT_SPARSE_OPTIMAL_P, 3500, 4000 },
     { REPEAT_SPARSE_OPTIMAL_P, 4000, 8000 },
     { REPEAT_SPARSE_OPTIMAL_P, 4500, 8000 },
-    { REPEAT_SPARSE_OPTIMAL_P, 5000, 5001 }
+    { REPEAT_SPARSE_OPTIMAL_P, 5000, 5001 },
+    { REPEAT_SPARSE_OPTIMAL_P, 60000, 65534 }
 };
 
 static
@@ -802,7 +830,7 @@ TEST_P(SparseOptimalTest, Simple1) {
                                   1000 + info->repeatMax * 2));
     ASSERT_EQ(0U, repeatNextMatch(info, ctrl, state,
                                   1000 + info->repeatMax * 2 + 1));
-    ASSERT_EQ(0U, repeatNextMatch(info, ctrl, state, 10000));
+    ASSERT_EQ(0U, repeatNextMatch(info, ctrl, state, 100000));
 }
 
 TEST_P(SparseOptimalTest, TwoTopsNeg) {
@@ -891,6 +919,24 @@ TEST_P(SparseOptimalTest, Simple3e) {
     test_sparse3entry(info, ctrl, state, 2 * info->minPeriod - 1);
     test_sparse3entryNeg(info, ctrl, state, 2 * info->minPeriod - 1);
     test_sparse3entryExpire(info, ctrl, state, 2 * info->minPeriod - 1);
+}
+
+TEST_P(SparseOptimalTest, LargeGap) {
+    SCOPED_TRACE(testing::Message() << "Repeat: " << *info);
+
+    for (int i = 0; i < 64; i++) {
+        u64a top1 = 1000;
+        repeatStore(info, ctrl, state, top1, 0); // first top
+        ASSERT_EQ(top1, repeatLastTop(info, ctrl, state));
+
+        // Add a second top after a gap of 2^i bytes.
+        u64a top2 = top1 + (1ULL << i);
+        if (top2 - top1 < info->minPeriod) {
+            continue; // not a valid top
+        }
+        repeatStore(info, ctrl, state, top2, 1); // second top
+        ASSERT_EQ(top2, repeatLastTop(info, ctrl, state));
+    }
 }
 
 TEST_P(SparseOptimalTest, ThreeTops) {

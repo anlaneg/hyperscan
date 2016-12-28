@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -64,7 +64,7 @@ namespace ue2 {
  */
 class ConstructLiteralVisitor : public ConstComponentVisitor {
 public:
-    ~ConstructLiteralVisitor();
+    ~ConstructLiteralVisitor() override;
 
     /** \brief Thrown if this component does not represent a literal. */
     struct NotLiteral {};
@@ -162,7 +162,7 @@ ConstructLiteralVisitor::~ConstructLiteralVisitor() {}
 bool shortcutLiteral(NG &ng, const ParsedExpression &expr) {
     assert(expr.component);
 
-    if (!ng.cc.grey.allowRose) {
+    if (!ng.cc.grey.allowLiteral) {
         return false;
     }
 

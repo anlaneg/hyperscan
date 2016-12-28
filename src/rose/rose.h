@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -29,82 +29,28 @@
 #ifndef ROSE_H
 #define ROSE_H
 
-#include "rose_types.h"
-#include "rose_internal.h"
-#include "runtime.h"
-#include "scratch.h"
 #include "ue2common.h"
-#include "util/multibit.h"
+
+struct RoseEngine;
+struct hs_scratch;
 
 // Initialise state space for engine use.
-void roseInitState(const struct RoseEngine *t, u8 *state);
-
-void roseBlockEodExec(const struct RoseEngine *t, u64a offset,
-                      struct hs_scratch *scratch);
-void roseBlockExec_i(const struct RoseEngine *t, struct hs_scratch *scratch,
-                     RoseCallback callback, RoseCallbackSom som_callback,
-                     void *context);
+void roseInitState(const struct RoseEngine *t, char *state);
 
 /* assumes core_info in scratch has been init to point to data */
-static really_inline
-void roseBlockExec(const struct RoseEngine *t, struct hs_scratch *scratch,
-                   RoseCallback callback, RoseCallbackSom som_callback,
-                   void *context) {
-    assert(t);
-    assert(scratch);
-    assert(scratch->core_info.buf);
-
-    // If this block is shorter than our minimum width, then no pattern in this
-    // RoseEngine could match.
-    /* minWidth checks should have already been performed by the caller */
-    const size_t length = scratch->core_info.len;
-    assert(length >= t->minWidth);
-
-    // Similarly, we may have a maximum width (for engines constructed entirely
-    // of bi-anchored patterns).
-    /* This check is now handled by the interpreter */
-    assert(t->maxBiAnchoredWidth == ROSE_BOUND_INF
-           || length <= t->maxBiAnchoredWidth);
-
-    roseBlockExec_i(t, scratch, callback, som_callback, context);
-
-    if (!t->requiresEodCheck) {
-        return;
-    }
-
-    if (can_stop_matching(scratch)) {
-        DEBUG_PRINTF("bailing, already halted\n");
-        return;
-    }
-
-    struct mmbit_sparse_state *s = scratch->sparse_iter_state;
-    const u32 numStates = t->rolesWithStateCount;
-    u8 *state = (u8 *)scratch->core_info.state;
-    void *role_state = getRoleState(state);
-    u32 idx = 0;
-    const struct mmbit_sparse_iter *it
-        = (const void *)((const u8 *)t + t->eodIterOffset);
-
-    if (!t->ematcherOffset && !t->hasEodEventLiteral
-        && !mmbit_any(getActiveLeafArray(t, state), t->activeArrayCount)
-        && (!t->eodIterOffset
-            || mmbit_sparse_iter_begin(role_state, numStates, &idx, it, s)
-            == MMB_INVALID)) {
-        return;
-    }
-
-    roseBlockEodExec(t, length, scratch);
-}
+void roseBlockExec(const struct RoseEngine *t, struct hs_scratch *scratch);
 
 /* assumes core_info in scratch has been init to point to data */
-void roseStreamExec(const struct RoseEngine *t, u8 *state,
-                    struct hs_scratch *scratch, RoseCallback callback,
-                    RoseCallbackSom som_callback, void *context);
+void roseStreamExec(const struct RoseEngine *t, struct hs_scratch *scratch);
 
-void roseEodExec(const struct RoseEngine *t, u8 *state, u64a offset,
-                 struct hs_scratch *scratch, RoseCallback callback,
-                 RoseCallbackSom som_callback, void *context);
+void roseStreamEodExec(const struct RoseEngine *t, u64a offset,
+                       struct hs_scratch *scratch);
 
-#define ROSE_CONTINUE_MATCHING_NO_EXHAUST 2
+hwlmcb_rv_t roseCallback(size_t start, size_t end, u32 id, void *context);
+
+int roseReportAdaptor(u64a start, u64a end, ReportID id, void *context);
+
+int roseRunBoundaryProgram(const struct RoseEngine *rose, u32 program,
+                           u64a stream_offset, struct hs_scratch *scratch);
 
 #endif // ROSE_H

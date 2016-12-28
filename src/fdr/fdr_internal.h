@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -76,15 +76,17 @@ struct FDR {
      * structures (spillover strings and hash table) if we're a secondary
      * structure. */
     u32 link;
-    u32 pad1;
-    u32 pad2;
-    u32 pad3;
+    u8 stride; /* stride - how frequeuntly the data is consulted by the first
+                * stage matcher */
+    u8 domain; /* number of bits used to index into main FDR table. This value
+                * is used only of debugging/asserts. */
+    u16 domainMask; /* pre-computed domain mask */
+    u32 tabSize; /* pre-computed hashtable size in bytes */
+    u32 pad;
 
-    union {
-        u32 s_u32;
-        u64a s_u64a;
-        m128 s_m128;
-    } start;
+    m128 start; /* initial start state to use at offset 0. The state has been set
+                 * up based on the min length of buckets to reduce the need for
+                 * pointless confirms. */
 };
 
 /** \brief FDR runtime arguments.
@@ -103,7 +105,6 @@ struct FDR_Runtime_Args {
     size_t start_offset;
     HWLMCallback cb;
     void *ctxt;
-    hwlm_group_t *groups;
     const u8 *firstFloodDetect;
     const u64a histBytes;
 };

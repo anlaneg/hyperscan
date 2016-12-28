@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -30,11 +30,13 @@
 
 #include "rose_build_dump.h"
 
-#include "hwlm/hwlm_build.h"
 #include "rose_build_impl.h"
+#include "rose_build_matchers.h"
 #include "rose/rose_dump.h"
 #include "rose_internal.h"
 #include "ue2common.h"
+#include "hwlm/hwlm_build.h"
+#include "nfa/castlecompile.h"
 #include "nfa/nfa_internal.h"
 #include "nfagraph/ng_dump.h"
 #include "som/slot_manager_dump.h"
@@ -59,40 +61,22 @@ using namespace std;
 
 namespace ue2 {
 
-static
-string to_string(nfa_kind k) {
-    switch (k) {
-    case NFA_PREFIX:
-        return "p";
-    case NFA_INFIX:
-        return "i";
-    case NFA_SUFFIX:
-        return "s";
-    case NFA_OUTFIX:
-        return "o";
-    case NFA_REV_PREFIX:
-        return "r";
+/** \brief Return the kind of a left_id or a suffix_id. */
+template<class Graph>
+string render_kind(const Graph &g) {
+    if (g.graph()) {
+        return to_string(g.graph()->kind);
     }
-    assert(0);
-    return "?";
-}
-
-// Get the RoseRole associated with a given vertex in the build graph from the
-// RoseEngine.
-static
-const RoseRole *getRoseRole(const RoseBuildImpl &build,
-                            const RoseEngine *engine, RoseVertex v) {
-    if (!engine) {
-        return nullptr;
+    if (g.dfa()) {
+        return to_string(g.dfa()->kind);
     }
-
-    u32 role_idx = build.g[v].role;
-    if (role_idx == MO_INVALID_IDX) {
-        return nullptr;
+    if (g.haig()) {
+        return to_string(g.haig()->kind);
     }
-
-    const RoseRole *roles = getRoleTable(engine);
-    return &roles[role_idx];
+    if (g.castle()) {
+        return to_string(g.castle()->kind);
+    }
+    return "UNKNOWN";
 }
 
 namespace {
@@ -120,7 +104,7 @@ public:
         }
 
         os << "[label=\"";
-        os << "role=" << g[v].role << "[i" << g[v].idx <<"]\\n";
+        os << "idx=" << g[v].idx <<"\\n";
 
         for (u32 lit_id : g[v].literals) {
             writeLiteral(os, lit_id);
@@ -144,65 +128,30 @@ public:
             os << " (rep=" << as_string_list(g[v].reports) << ")";
         }
 
-        const RoseRole *r = getRoseRole(v);
-
         if (g[v].suffix) {
-            os << "\\nSUFFIX (TOP " << g[v].suffix.top;
-            if (r) {
-                assert(t);
-                const NFA *n = (const NFA *)((const char *)t + r->suffixOffset);
-                os << ", Q" << n->queueIndex;
-            } else {
-                // Can't dump the queue number, but we can identify the suffix.
-                if (g[v].suffix.graph) {
-                    os << ", graph=" << g[v].suffix.graph.get()
-                       << " " << to_string(g[v].suffix.graph->kind);
-                }
-                if (g[v].suffix.castle) {
-                    os << ", castle=" << g[v].suffix.castle.get();
-                }
-                if (g[v].suffix.rdfa) {
-                    os << ", dfa=" << g[v].suffix.rdfa.get();
-                }
-                if (g[v].suffix.haig) {
-                    os << ", haig=" << g[v].suffix.haig.get();
-                }
-
+            suffix_id suff(g[v].suffix);
+            os << "\\n" << render_kind(suff) << " (top " << g[v].suffix.top;
+            auto it = build.suffix_queue_map.find(suff);
+            if (it != end(build.suffix_queue_map)) {
+                os << ", queue " << it->second;
             }
             os << ")";
         }
 
-        if (!g[v].literals.empty()) {
-            u32 id = *g[v].literals.begin();
-            if (id < build.literal_info.size()
-                && build.literal_info[id].final_id != MO_INVALID_IDX
-                && (build.literal_info[id].final_id & LITERAL_DR_FLAG)) {
-                os << "\\nDIRECT REPORT";
-            }
-        }
-
-        if (g[v].escapes.any()) {
-            os << "\\nescapes=";
-            describeClass(os, g[v].escapes, 5, CC_OUT_DOT);
-        }
         if (ghost.find(v) != ghost.end()) {
             os << "\\nGHOST";
         }
 
         if (g[v].left) {
-            const char *roseKind =
-                build.isRootSuccessor(v) ? "PREFIX" : "INFIX";
-            os << "\\nROSE " << roseKind;
-            os << " (";
-            if (r) {
-                os << "Q" << r->leftfixQueue << ", ";
+            left_id left(g[v].left);
+            os << "\\n" << render_kind(left) << " (queue ";
+            auto it = build.leftfix_queue_map.find(left);
+            if (it != end(build.leftfix_queue_map)) {
+                os << it->second;
+            } else {
+                os << "??";
             }
-
-            os << "report " << g[v].left.leftfix_report << ")";
-
-            if (g[v].left.graph) {
-                os << " " << to_string(g[v].left.graph->kind);
-            }
+            os << ", report " << g[v].left.leftfix_report << ")";
         }
 
         os << "\"";
@@ -290,10 +239,6 @@ private:
         }
     }
 
-    const RoseRole *getRoseRole(RoseVertex v) const {
-        return ue2::getRoseRole(build, t, v);
-    }
-
     set<RoseVertex> ghost;
     const RoseBuildImpl &build;
     const RoseEngine *t;
@@ -306,13 +251,17 @@ void dumpRoseGraph(const RoseBuild &build_base, const RoseEngine *t,
     const RoseBuildImpl &build = dynamic_cast<const RoseBuildImpl &>(build_base);
 
     const Grey &grey = build.cc.grey;
-    if (!grey.dumpFlags) {
+
+    /* "early" rose graphs should only be dumped if we are dumping intermediate
+     * graphs. Early graphs can be identified by the lack of a RoseEngine. */
+    u32 flag_test = t ? Grey::DUMP_IMPL : Grey::DUMP_INT_GRAPH;
+
+    if (!(grey.dumpFlags & flag_test)) {
         return;
     }
 
     stringstream ss;
     ss << grey.dumpPath << filename;
-
 
     DEBUG_PRINTF("dumping graph to %s\n", ss.str().c_str());
     ofstream os(ss.str());
@@ -325,7 +274,7 @@ namespace {
 struct CompareVertexRole {
     explicit CompareVertexRole(const RoseGraph &g_in) : g(g_in) {}
     inline bool operator()(const RoseVertex &a, const RoseVertex &b) const {
-        return g[a].role < g[b].role;
+        return g[a].idx < g[b].idx;
     }
 private:
     const RoseGraph &g;
@@ -353,8 +302,6 @@ void dumpRoseLiterals(const RoseBuildImpl &build, const char *filename) {
 
     os << "ROSE LITERALS: a total of " << build.literals.right.size()
        << " literals and " << num_vertices(g) << " roles." << endl << endl;
-
-    const auto depths = findDepths(build);
 
     for (const auto &e : build.literals.right) {
         u32 id = e.first;
@@ -425,9 +372,8 @@ void dumpRoseLiterals(const RoseBuildImpl &build, const char *filename) {
 
         for (RoseVertex v : verts) {
             // role info
-            os << "  Role " << g[v].role << ": depth=" << depths.at(v)
-               << ", groups=0x" << hex << setw(16) << setfill('0')
-               << g[v].groups << dec;
+            os << "  Index " << g[v].idx << ": groups=0x" << hex << setw(16)
+               << setfill('0') << g[v].groups << dec;
 
             if (g[v].reports.empty()) {
                 os << ", report=NONE";
@@ -439,14 +385,14 @@ void dumpRoseLiterals(const RoseBuildImpl &build, const char *filename) {
             os << ", max_offset=" << g[v].max_offset << endl;
             // pred info
             for (const auto &ie : in_edges_range(v, g)) {
-                os << "    Predecessor role=";
-                u32 predRole = g[source(ie, g)].role;
-                if (predRole == MO_INVALID_IDX) {
+                const auto &u = source(ie, g);
+                os << "    Predecessor idx=";
+                if (u == build.root) {
                     os << "ROOT";
-                } else if (predRole == g[build.anchored_root].role) {
+                } else if (u == build.anchored_root) {
                     os << "ANCHORED_ROOT";
                 } else {
-                    os << predRole;
+                    os << g[u].idx;
                 }
                 os << ": bounds [" << g[ie].minBound << ", ";
                 if (g[ie].maxBound == ROSE_BOUND_INF) {
@@ -494,96 +440,25 @@ void dumpTestLiterals(const string &filename, const vector<hwlmLiteral> &lits) {
     of.close();
 }
 
-namespace {
-struct LongerThanLimit {
-    explicit LongerThanLimit(size_t len) : max_len(len) {}
-    bool operator()(const hwlmLiteral &lit) const {
-        return lit.s.length() > max_len;
-    }
-
-  private:
-    size_t max_len;
-};
-}
-
 static
 void dumpRoseTestLiterals(const RoseBuildImpl &build, const string &base) {
-
-    vector<hwlmLiteral> lits;
-
-    fillHamsterLiteralList(build, ROSE_ANCHORED, &lits);
+    auto lits = fillHamsterLiteralList(build, ROSE_ANCHORED);
     dumpTestLiterals(base + "rose_anchored_test_literals.txt", lits);
 
-    lits.clear();
-    fillHamsterLiteralList(build, ROSE_FLOATING, &lits);
+    lits = fillHamsterLiteralList(build, ROSE_FLOATING);
     dumpTestLiterals(base + "rose_float_test_literals.txt", lits);
 
-    lits.clear();
-    fillHamsterLiteralList(build, ROSE_EOD_ANCHORED, &lits);
+    lits = fillHamsterLiteralList(build, ROSE_EOD_ANCHORED);
     dumpTestLiterals(base + "rose_eod_test_literals.txt", lits);
 
-    lits.clear();
-    fillHamsterLiteralList(build, ROSE_FLOATING, &lits);
-    fillHamsterLiteralList(build, ROSE_ANCHORED_SMALL_BLOCK, &lits);
-    lits.erase(remove_if(lits.begin(), lits.end(),
-                         LongerThanLimit(ROSE_SMALL_BLOCK_LEN)),
-               lits.end());
-    dumpTestLiterals(base + "rose_smallblock_test_literals.txt", lits);
-}
-
-static
-CharReach bitvectorToReach(const u8 *reach) {
-    CharReach cr;
-
-    for (size_t i = 0; i < 256; i++) {
-        if (reach[i / 8] & (1U << (i % 8))) {
-            cr.set(i);
-
-        }
+    if (!build.cc.streaming) {
+        lits = fillHamsterLiteralList(build, ROSE_FLOATING,
+                                      ROSE_SMALL_BLOCK_LEN);
+        auto lits2 = fillHamsterLiteralList(build, ROSE_ANCHORED_SMALL_BLOCK,
+                                            ROSE_SMALL_BLOCK_LEN);
+        lits.insert(end(lits), begin(lits2), end(lits2));
+        dumpTestLiterals(base + "rose_smallblock_test_literals.txt", lits);
     }
-    return cr;
-}
-
-static
-void dumpRoseLookaround(const RoseBuildImpl &build, const RoseEngine *t,
-                        const Grey &grey, const string &filename) {
-    stringstream ss;
-    ss << grey.dumpPath << filename;
-    ofstream os(ss.str());
-
-    const RoseGraph &g = build.g;
-
-    const u8 *base = (const u8 *)t;
-    const s8 *look_base = (const s8 *)(base + t->lookaroundTableOffset);
-    const u8 *reach_base = base + t->lookaroundReachOffset;
-
-    for (RoseVertex v : vertices_range(g)) {
-        const RoseRole *role = getRoseRole(build, t, v);
-        if (!role || role->lookaroundIndex == MO_INVALID_IDX) {
-            continue;
-        }
-
-        os << "Role " << g[v].role << endl;
-        os << "  literals: " << as_string_list(g[v].literals) << endl;
-        os << "  lookaround: index=" << role->lookaroundIndex
-           << ", count=" << role->lookaroundCount << endl;
-
-        const s8 *look = look_base + role->lookaroundIndex;
-        const s8 *look_end = look + role->lookaroundCount;
-        const u8 *reach =
-            reach_base + role->lookaroundIndex * REACH_BITVECTOR_LEN;
-
-        for (; look < look_end; look++, reach += REACH_BITVECTOR_LEN) {
-            os << "    " << std::setw(4) << std::setfill(' ') << int{*look}
-               << ": ";
-            describeClass(os, bitvectorToReach(reach), 1000, CC_OUT_TEXT);
-            os << endl;
-        }
-
-        os << endl;
-    }
-
-    os.close();
 }
 
 void dumpRose(const RoseBuild &build_base, const RoseEngine *t,
@@ -625,9 +500,6 @@ void dumpRose(const RoseBuild &build_base, const RoseEngine *t,
     f = fopen((grey.dumpPath + "/rose_struct.txt").c_str(), "w");
     roseDumpStructRaw(t, f);
     fclose(f);
-
-    // Lookaround tables.
-    dumpRoseLookaround(build, t, grey, "rose_lookaround.txt");
 }
 
 } // namespace ue2

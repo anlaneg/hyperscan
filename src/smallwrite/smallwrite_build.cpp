@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -34,6 +34,7 @@
 #include "nfa/mcclellancompile_util.h"
 #include "nfa/nfa_internal.h"
 #include "nfa/rdfa_merge.h"
+#include "nfa/shengcompile.h"
 #include "nfagraph/ng.h"
 #include "nfagraph/ng_holder.h"
 #include "nfagraph/ng_mcclellan.h"
@@ -65,13 +66,16 @@ namespace { // unnamed
 // Concrete impl class
 class SmallWriteBuildImpl : public SmallWriteBuild {
 public:
-    SmallWriteBuildImpl(const ReportManager &rm, const CompileContext &cc);
+    SmallWriteBuildImpl(size_t num_patterns, const ReportManager &rm,
+                        const CompileContext &cc);
 
     // Construct a runtime implementation.
     aligned_unique_ptr<SmallWriteEngine> build(u32 roseQuality) override;
 
     void add(const NGWrapper &w) override;
     void add(const ue2_literal &literal, ReportID r) override;
+
+    set<ReportID> all_reports() const override;
 
     bool determiniseLiterals();
 
@@ -87,11 +91,14 @@ public:
 
 SmallWriteBuild::~SmallWriteBuild() { }
 
-SmallWriteBuildImpl::SmallWriteBuildImpl(const ReportManager &rm_in,
+SmallWriteBuildImpl::SmallWriteBuildImpl(size_t num_patterns,
+                                         const ReportManager &rm_in,
                                          const CompileContext &cc_in)
     : rm(rm_in), cc(cc_in),
       /* small write is block mode only */
-      poisoned(!cc.grey.allowSmallWrite || cc.streaming) {
+      poisoned(!cc.grey.allowSmallWrite
+               || cc.streaming
+               || num_patterns > cc.grey.smallWriteMaxPatterns) {
 }
 
 void SmallWriteBuildImpl::add(const NGWrapper &w) {
@@ -163,6 +170,10 @@ void SmallWriteBuildImpl::add(const ue2_literal &literal, ReportID r) {
     }
 
     cand_literals.push_back(make_pair(literal, r));
+
+    if (cand_literals.size() > cc.grey.smallWriteMaxLiterals) {
+        poisoned = true;
+    }
 }
 
 static
@@ -181,6 +192,7 @@ void lit_to_graph(NGHolder *h, const ue2_literal &literal, ReportID r) {
 bool SmallWriteBuildImpl::determiniseLiterals() {
     DEBUG_PRINTF("handling literals\n");
     assert(!poisoned);
+    assert(cand_literals.size() <= cc.grey.smallWriteMaxLiterals);
 
     if (cand_literals.empty()) {
         return true; /* nothing to do */
@@ -302,42 +314,59 @@ bool is_slow(const raw_dfa &rdfa, const set<dstate_id_t> &accel,
 }
 
 static
+aligned_unique_ptr<NFA> getDfa(raw_dfa &rdfa, const CompileContext &cc,
+                               const ReportManager &rm,
+                               set<dstate_id_t> &accel_states) {
+    aligned_unique_ptr<NFA> dfa = nullptr;
+    if (cc.grey.allowSmallWriteSheng) {
+        dfa = shengCompile(rdfa, cc, rm, &accel_states);
+    }
+    if (!dfa) {
+        dfa = mcclellanCompile(rdfa, cc, rm, &accel_states);
+    }
+    return dfa;
+}
+
+static
 aligned_unique_ptr<NFA> prepEngine(raw_dfa &rdfa, u32 roseQuality,
-                                   const CompileContext &cc, u32 *start_offset,
+                                   const CompileContext &cc,
+                                   const ReportManager &rm, u32 *start_offset,
                                    u32 *small_region) {
     *start_offset = remove_leading_dots(rdfa);
 
     // Unleash the McClellan!
     set<dstate_id_t> accel_states;
 
-    auto nfa = mcclellanCompile(rdfa, cc, &accel_states);
+    auto nfa = getDfa(rdfa, cc, rm, accel_states);
     if (!nfa) {
-        DEBUG_PRINTF("mcclellan compile failed for smallwrite NFA\n");
+        DEBUG_PRINTF("DFA compile failed for smallwrite NFA\n");
         return nullptr;
     }
 
     if (is_slow(rdfa, accel_states, roseQuality)) {
+        DEBUG_PRINTF("is slow\n");
         *small_region = cc.grey.smallWriteLargestBufferBad;
         if (*small_region <= *start_offset) {
             return nullptr;
         }
-        prune_overlong(rdfa, *small_region - *start_offset);
-        if (rdfa.start_anchored == DEAD_STATE) {
-            DEBUG_PRINTF("all patterns pruned out\n");
-            return nullptr;
-        }
+        if (prune_overlong(rdfa, *small_region - *start_offset)) {
+            if (rdfa.start_anchored == DEAD_STATE) {
+                DEBUG_PRINTF("all patterns pruned out\n");
+                return nullptr;
+            }
 
-        nfa = mcclellanCompile(rdfa, cc, &accel_states);
-        if (!nfa) {
-            DEBUG_PRINTF("mcclellan compile failed for smallwrite NFA\n");
-            assert(0); /* we were able to build orig dfa but not the trimmed? */
-            return nullptr;
+            nfa = getDfa(rdfa, cc, rm, accel_states);
+            if (!nfa) {
+                DEBUG_PRINTF("DFA compile failed for smallwrite NFA\n");
+                assert(0); /* able to build orig dfa but not the trimmed? */
+                return nullptr;
+            }
         }
     } else {
         *small_region = cc.grey.smallWriteLargestBuffer;
     }
 
-    assert(isMcClellanType(nfa->type));
+    assert(isDfaType(nfa->type));
     if (nfa->length > cc.grey.limitSmallWriteOutfixSize
         || nfa->length > cc.grey.limitDFASize) {
         DEBUG_PRINTF("smallwrite outfix size too large\n");
@@ -349,9 +378,10 @@ aligned_unique_ptr<NFA> prepEngine(raw_dfa &rdfa, u32 roseQuality,
 }
 
 // SmallWriteBuild factory
-unique_ptr<SmallWriteBuild> makeSmallWriteBuilder(const ReportManager &rm,
+unique_ptr<SmallWriteBuild> makeSmallWriteBuilder(size_t num_patterns,
+                                                  const ReportManager &rm,
                                                   const CompileContext &cc) {
-    return ue2::make_unique<SmallWriteBuildImpl>(rm, cc);
+    return ue2::make_unique<SmallWriteBuildImpl>(num_patterns, rm, cc);
 }
 
 aligned_unique_ptr<SmallWriteEngine>
@@ -376,7 +406,8 @@ SmallWriteBuildImpl::build(u32 roseQuality) {
 
     u32 start_offset;
     u32 small_region;
-    auto nfa = prepEngine(*rdfa, roseQuality, cc, &start_offset, &small_region);
+    auto nfa =
+        prepEngine(*rdfa, roseQuality, cc, rm, &start_offset, &small_region);
     if (!nfa) {
         DEBUG_PRINTF("some smallwrite outfix could not be prepped\n");
         /* just skip the smallwrite optimization */
@@ -397,6 +428,20 @@ SmallWriteBuildImpl::build(u32 roseQuality) {
 
     DEBUG_PRINTF("smallwrite done %p\n", smwr.get());
     return smwr;
+}
+
+set<ReportID> SmallWriteBuildImpl::all_reports() const {
+    set<ReportID> reports;
+    if (poisoned) {
+        return reports;
+    }
+    if (rdfa) {
+        insert(&reports, ::ue2::all_reports(*rdfa));
+    }
+    for (const auto &cand : cand_literals) {
+        reports.insert(cand.second);
+    }
+    return reports;
 }
 
 size_t smwrSize(const SmallWriteEngine *smwr) {

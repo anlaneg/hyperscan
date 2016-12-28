@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -48,7 +48,8 @@
 
 namespace ue2 {
 
-void nfaExecCastle0_dumpDot(const struct NFA *, FILE *) {
+void nfaExecCastle0_dumpDot(const struct NFA *, FILE *,
+                            UNUSED const std::string &base) {
     // No GraphViz output for Castles.
 }
 
@@ -100,6 +101,7 @@ void nfaExecCastle0_dumpText(const struct NFA *nfa, FILE *f) {
         fprintf(f, "unknown type %u\n", c->type);
         break;
     }
+    fprintf(f, "Stale Iter Offset:          %u\n", c->staleIterOffset);
 
     fprintf(f, "\n");
     dumpTextReverse(nfa, f);

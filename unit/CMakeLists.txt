@@ -7,7 +7,8 @@ if(NOT XCODE)
 else()
     set(CMAKE_CXX_FLAGS "-isystem ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CXX_FLAGS}")
 endif()
-include_directories(${CMAKE_SOURCE_DIR}/util)
+
+include_directories(${PROJECT_SOURCE_DIR})
 
 # remove some warnings
 # cmake's scope means these only apply here
@@ -24,9 +25,14 @@ if(CXX_WUNUSED_VARIABLE)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-variable")
 endif()
 
-add_library(gtest ${gtest_SOURCES})
+if(CMAKE_COMPILER_IS_GNUCC)
+    # spurious warnings?
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-array-bounds")
+endif()
 
-add_definitions(-DGTEST_HAS_PTHREAD=0 -DSRCDIR=${CMAKE_SOURCE_DIR})
+add_library(gtest STATIC ${gtest_SOURCES})
+
+add_definitions(-DGTEST_HAS_PTHREAD=0 -DSRCDIR=${PROJECT_SOURCE_DIR})
 
 if (NOT RELEASE_BUILD)
 set(unit_internal_SOURCES
@@ -46,6 +52,8 @@ set(unit_internal_SOURCES
     internal/limex_nfa.cpp
     internal/masked_move.cpp
     internal/multi_bit.cpp
+    internal/multiaccel_matcher.cpp
+    internal/multiaccel_shift.cpp
     internal/nfagraph_common.h
     internal/nfagraph_comp.cpp
     internal/nfagraph_equivalence.cpp
@@ -62,8 +70,8 @@ set(unit_internal_SOURCES
     internal/pqueue.cpp
     internal/repeat.cpp
     internal/rose_build_merge.cpp
+    internal/rose_mask.cpp
     internal/rvermicelli.cpp
-    internal/sidecar.cpp
     internal/simd_utils.cpp
     internal/shuffle.cpp
     internal/shufti.cpp
@@ -95,6 +103,7 @@ set(unit_hyperscan_SOURCES
     hyperscan/multi.cpp
     hyperscan/order.cpp
     hyperscan/scratch_op.cpp
+    hyperscan/scratch_in_use.cpp
     hyperscan/serialize.cpp
     hyperscan/single.cpp
     hyperscan/som.cpp

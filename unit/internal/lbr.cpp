@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -36,7 +36,7 @@
 #include "nfa/nfa_internal.h"
 #include "nfa/nfa_api_util.h"
 #include "nfagraph/ng_lbr.h"
-#include "scratch.h"
+#include "nfagraph/ng_util.h"
 #include "util/alloc.h"
 #include "util/compile_context.h"
 #include "grey.h"
@@ -49,6 +49,8 @@
 using namespace std;
 using namespace testing;
 using namespace ue2;
+
+static constexpr u32 MATCH_REPORT = 1024;
 
 struct LbrTestParams {
     CharReach reach;
@@ -70,7 +72,7 @@ struct LbrTestParams {
 };
 
 static
-int onMatch(u64a, ReportID, void *ctx) {
+int onMatch(u64a, u64a, ReportID, void *ctx) {
     unsigned *matches = (unsigned *)ctx;
     (*matches)++;
     return MO_CONTINUE_MATCHING;
@@ -96,13 +98,15 @@ protected:
         ParsedExpression parsed(0, pattern.c_str(), flags, 0);
         unique_ptr<NGWrapper> g = buildWrapper(rm, cc, parsed);
         ASSERT_TRUE(g != nullptr);
+        clearReports(*g);
 
         ASSERT_TRUE(isLBR(*g, grey));
 
-        vector<vector<CharReach> > triggers;
-        triggers.push_back(vector<CharReach>());
-        triggers.back().push_back(CharReach::dot()); /* lbr triggered by . */
-        nfa = constructLBR(*g, triggers, cc);
+        rm.setProgramOffset(0, MATCH_REPORT);
+
+        /* LBR triggered by dot */
+        vector<vector<CharReach>> triggers = {{CharReach::dot()}};
+        nfa = constructLBR(*g, triggers, cc, rm);
         ASSERT_TRUE(nfa != nullptr);
 
         full_state = aligned_zmalloc_unique<char>(nfa->scratchStateSize);
@@ -123,7 +127,6 @@ protected:
         q.scratch = nullptr; // not needed by LBR
         q.report_current = 0;
         q.cb = onMatch;
-        q.som_cb = nullptr; // only used by Haig
         q.context = &matches;
     }
 
@@ -155,9 +158,6 @@ protected:
 
     // Space for stream state.
     aligned_unique_ptr<char> stream_state;
-
-    // Space for NFAContext structure.
-    aligned_unique_ptr<void> nfa_context;
 
     // Queue structure.
     struct mq q;
@@ -252,7 +252,7 @@ TEST_P(LbrTest, QueueExecToMatch) {
     char rv = nfaQueueExecToMatch(nfa.get(), &q, end);
     ASSERT_EQ(MO_MATCHES_PENDING, rv);
     ASSERT_EQ(0, matches);
-    ASSERT_NE(0, nfaInAcceptState(nfa.get(), 0, &q));
+    ASSERT_NE(0, nfaInAcceptState(nfa.get(), MATCH_REPORT, &q));
     nfaReportCurrentMatches(nfa.get(), &q);
     ASSERT_EQ(1, matches);
 }

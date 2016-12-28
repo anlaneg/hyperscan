@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -58,7 +58,7 @@ namespace ue2 {
 
 struct StateInfo {
     StateInfo(NFAVertex v, const CharReach &cr) : vertex(v), reach(cr) {}
-    StateInfo() : vertex(NFAGraph::null_vertex()) {}
+    StateInfo() : vertex(NGHolder::null_vertex()) {}
     NFAVertex vertex;
     CharReach reach;
 };
@@ -125,61 +125,62 @@ void execute_graph_i(const NGHolder &g, const vector<StateInfo> &info,
 }
 
 static
-void fillStateBitset(const NGHolder &g, const set<NFAVertex> &in,
-                     dynamic_bitset<> &out) {
-    out.reset();
-    for (auto v : in) {
+dynamic_bitset<> makeStateBitset(const NGHolder &g,
+                                 const flat_set<NFAVertex> &in) {
+    dynamic_bitset<> work_states(num_vertices(g));
+    for (const auto &v : in) {
         u32 idx = g[v].index;
-        out.set(idx);
+        work_states.set(idx);
     }
+    return work_states;
 }
 
 static
-void fillVertexSet(const dynamic_bitset<> &in,
-                   const vector<StateInfo> &info, set<NFAVertex> &out) {
-    out.clear();
+flat_set<NFAVertex> getVertices(const dynamic_bitset<> &in,
+                                const vector<StateInfo> &info) {
+    flat_set<NFAVertex> out;
     for (size_t i = in.find_first(); i != in.npos; i = in.find_next(i)) {
         out.insert(info[i].vertex);
     }
+    return out;
 }
 
 static
-void fillInfoTable(const NGHolder &g, vector<StateInfo> &info) {
-    info.resize(num_vertices(g));
+vector<StateInfo> makeInfoTable(const NGHolder &g) {
+    vector<StateInfo> info(num_vertices(g));
     for (auto v : vertices_range(g)) {
         u32 idx = g[v].index;
         const CharReach &cr = g[v].char_reach;
         assert(idx < info.size());
         info[idx] = StateInfo(v, cr);
     }
+    return info;
 }
 
-void execute_graph(const NGHolder &g, const ue2_literal &input,
-                   set<NFAVertex> *states, bool kill_sds) {
+flat_set<NFAVertex> execute_graph(const NGHolder &g, const ue2_literal &input,
+                                  const flat_set<NFAVertex> &initial_states,
+                                  bool kill_sds) {
     assert(hasCorrectlyNumberedVertices(g));
 
-    vector<StateInfo> info;
-    fillInfoTable(g, info);
-    dynamic_bitset<> work_states(num_vertices(g));
-    fillStateBitset(g, *states, work_states);
+    auto info = makeInfoTable(g);
+    auto work_states = makeStateBitset(g, initial_states);
 
     execute_graph_i(g, info, input, &work_states, kill_sds);
 
-    fillVertexSet(work_states, info, *states);
+    return getVertices(work_states, info);
 }
 
-void execute_graph(const NGHolder &g, const vector<CharReach> &input,
-                   set<NFAVertex> *states) {
+flat_set<NFAVertex> execute_graph(const NGHolder &g,
+                                  const vector<CharReach> &input,
+                                  const flat_set<NFAVertex> &initial_states) {
     assert(hasCorrectlyNumberedVertices(g));
 
-    vector<StateInfo> info;
-    fillInfoTable(g, info);
-    dynamic_bitset<> work_states(num_vertices(g));
-    fillStateBitset(g, *states, work_states);
+    auto info = makeInfoTable(g);
+    auto work_states = makeStateBitset(g, initial_states);
 
     execute_graph_i(g, info, input, &work_states, false);
 
-    fillVertexSet(work_states, info, *states);
+    return getVertices(work_states, info);
 }
 
 typedef boost::reverse_graph<const NFAGraph, const NFAGraph &> RevNFAGraph;
@@ -276,9 +277,10 @@ private:
 };
 } // namespace
 
-void execute_graph(const NGHolder &running_g, const NGHolder &input_dag,
-                   const set<NFAVertex> &input_start_states,
-                   set<NFAVertex> *states) {
+flat_set<NFAVertex> execute_graph(const NGHolder &running_g,
+                                  const NGHolder &input_dag,
+                                  const flat_set<NFAVertex> &input_start_states,
+                                  const flat_set<NFAVertex> &initial_states) {
     DEBUG_PRINTF("g has %zu vertices, input_dag has %zu vertices\n",
                  num_vertices(running_g), num_vertices(input_dag));
     assert(hasCorrectlyNumberedVertices(running_g));
@@ -290,10 +292,8 @@ void execute_graph(const NGHolder &running_g, const NGHolder &input_dag,
     RevNFAGraph revg(input_dag.g);
     map<NFAVertex, dynamic_bitset<> > dfs_states;
 
-    vector<StateInfo> info;
-    fillInfoTable(running_g, info);
-    dynamic_bitset<> input_fs(num_vertices(running_g));
-    fillStateBitset(running_g, *states, input_fs);
+    auto info = makeInfoTable(running_g);
+    auto input_fs = makeStateBitset(running_g, initial_states);
 
     for (auto v : input_start_states) {
         dfs_states[v] = input_fs;
@@ -303,21 +303,70 @@ void execute_graph(const NGHolder &running_g, const NGHolder &input_dag,
                       eg_visitor(running_g, info, input_dag, dfs_states),
                       make_assoc_property_map(colours));
 
-    fillVertexSet(dfs_states[input_dag.accept], info, *states);
+    auto states = getVertices(dfs_states[input_dag.accept], info);
 
 #ifdef DEBUG
-        DEBUG_PRINTF("  output rstates:");
-        for (auto v : *states) {
-            printf(" %u", running_g[v].index);
-        }
-        printf("\n");
+    DEBUG_PRINTF("  output rstates:");
+    for (const auto &v : states) {
+        printf(" %u", running_g[v].index);
+    }
+    printf("\n");
 #endif
+
+    return states;
 }
 
-void execute_graph(const NGHolder &running_g, const NGHolder &input_dag,
-                   set<NFAVertex> *states) {
-    set<NFAVertex> input_start_states = {input_dag.start, input_dag.startDs};
-    execute_graph(running_g, input_dag, input_start_states, states);
+flat_set<NFAVertex> execute_graph(const NGHolder &running_g,
+                                  const NGHolder &input_dag,
+                                  const flat_set<NFAVertex> &initial_states) {
+    auto input_start_states = {input_dag.start, input_dag.startDs};
+    return execute_graph(running_g, input_dag, input_start_states,
+                         initial_states);
+}
+
+static
+bool can_die_early(const NGHolder &g, const vector<StateInfo> &info,
+                   const dynamic_bitset<> &s,
+                   map<dynamic_bitset<>, u32> &visited, u32 age_limit) {
+    if (contains(visited, s) && visited[s] >= age_limit) {
+        /* we have already (or are in the process) of visiting here with a
+         * looser limit. */
+        return false;
+    }
+    visited[s] = age_limit;
+
+    if (s.none()) {
+        DEBUG_PRINTF("dead\n");
+        return true;
+    }
+
+    if (age_limit == 0) {
+        return false;
+    }
+
+    dynamic_bitset<> all_succ(s.size());
+    step(g, info, s, &all_succ);
+    all_succ.reset(NODE_START_DOTSTAR);
+
+    for (u32 i = 0; i < N_CHARS; i++) {
+        dynamic_bitset<> next = all_succ;
+        filter_by_reach(info, &next, CharReach(i));
+        if (can_die_early(g, info, next, visited, age_limit - 1)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool can_die_early(const NGHolder &g, u32 age_limit) {
+    if (proper_out_degree(g.startDs, g)) {
+        return false;
+    }
+    const vector<StateInfo> &info = makeInfoTable(g);
+    map<dynamic_bitset<>, u32> visited;
+    return can_die_early(g, info, makeStateBitset(g, {g.start}), visited,
+                         age_limit);
 }
 
 } // namespace ue2

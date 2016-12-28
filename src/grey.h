@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -50,11 +50,13 @@ struct Grey {
     bool allowLitHaig;
     bool allowLbr;
     bool allowMcClellan;
+    bool allowSheng;
     bool allowPuff;
+    bool allowLiteral;
     bool allowRose;
+    bool allowViolet;
     bool allowExtendedNFA;
     bool allowLimExNFA;
-    bool allowSidecar;
     bool allowAnchoredAcyclic;
     bool allowSmallLiteralSet;
     bool allowCastle;
@@ -62,6 +64,14 @@ struct Grey {
 
     bool allowNoodle;
     bool fdrAllowTeddy;
+
+    u32  violetAvoidSuffixes; /* 0=never, 1=sometimes, 2=always */
+    bool violetAvoidWeakInfixes;
+    bool violetDoubleCut;
+    bool violetExtractStrongLiterals;
+    bool violetLiteralChains;
+    u32  violetDoubleCutLiteralLen;
+    u32  violetEarlyCleanLiteralLen;
 
     bool puffImproveHead;
     bool castleExclusive; // enable castle mutual exclusion analysis
@@ -89,7 +99,6 @@ struct Grey {
     bool floodAsPuffette;
 
     u32 nfaForceSize;
-    u32 nfaForceShifts;
 
     u32 maxHistoryAvailable;
     u32 minHistoryAvailable;
@@ -141,9 +150,16 @@ struct Grey {
 
     // SmallWrite engine
     bool allowSmallWrite;
+    bool allowSmallWriteSheng;
     u32 smallWriteLargestBuffer;  // largest buffer that can be small write
     u32 smallWriteLargestBufferBad;// largest buffer that can be small write
     u32 limitSmallWriteOutfixSize; //!< max total size of outfix DFAs
+    u32 smallWriteMaxPatterns; // only try small writes if fewer patterns
+    u32 smallWriteMaxLiterals; // only try small writes if fewer literals
+
+    // Tamarama engine
+    bool allowTamarama;
+    u32 tamaChunkSize; //!< max chunk size for exclusivity analysis in Tamarama
 
     enum DumpFlags {
         DUMP_NONE       = 0,

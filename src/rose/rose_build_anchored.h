@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -38,18 +38,30 @@
 #include <vector>
 #include <set>
 
-struct RoseEngine;
+struct anchored_matcher_info;
 
 namespace ue2 {
 
-class NGHolder;
 class RoseBuildImpl;
-struct Grey;
+struct raw_dfa;
 
-aligned_unique_ptr<void> buildAnchoredAutomataMatcher(RoseBuildImpl &tbi,
-                                                      size_t *asize);
-u32 anchoredStateSize(const void *atable);
-bool anchoredIsMulti(const RoseEngine &engine);
+/**
+ * \brief Construct a set of anchored DFAs from our anchored literals/engines.
+ */
+std::vector<raw_dfa> buildAnchoredDfas(RoseBuildImpl &build);
+
+/**
+ * \brief Construct an anchored_matcher_info runtime structure from the given
+ * set of DFAs.
+ *
+ * Remap the literal final_ids used for raw_dfa reports to the program offsets
+ * given in litPrograms.
+ */
+aligned_unique_ptr<anchored_matcher_info>
+buildAnchoredMatcher(RoseBuildImpl &build, std::vector<raw_dfa> &dfas,
+                     const std::vector<u32> &litPrograms, size_t *asize);
+
+u32 anchoredStateSize(const anchored_matcher_info &atable);
 
 #define ANCHORED_FAIL    0
 #define ANCHORED_SUCCESS 1

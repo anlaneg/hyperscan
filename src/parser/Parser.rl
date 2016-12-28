@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -424,6 +424,7 @@ unichar readUtf8CodePoint4c(const u8 *ts) {
         assert(!inCharClass); // not reentrant
         currentCls = getComponentClass(mode);
         inCharClass = true;
+        inCharClassEarly = true;
         currentClsBegin = ts;
         fgoto readClass;
     }
@@ -474,6 +475,7 @@ unichar readUtf8CodePoint4c(const u8 *ts) {
     }
     action is_utf8 { mode.utf8 }
     action is_ignore_space { mode.ignore_space }
+    action is_early_charclass { inCharClassEarly }
 
     action addNumberedBackRef {
         if (accumulator == 0) {
@@ -790,10 +792,12 @@ unichar readUtf8CodePoint4c(const u8 *ts) {
         any => { throw LocatedParseError("Unknown property"); };
                      *|;
     charClassGuts := |*
-              # We don't like POSIX collating elements (neither does PCRE or Perl).
-              '\[\.' [^\]]* '\.\]' | 
-              '\[=' [^\]]* '=\]' => {
-                  throw LocatedParseError("Unsupported POSIX collating element");
+              # We don't support POSIX collating elements (neither does PCRE
+              # or Perl). These look like [.ch.] or [=ch=].
+              '\[\.' ( '\\]' | [^\]] )* '\.\]' |
+              '\[=' ( '\\]' | [^\]] )* '=\]' => {
+                  throw LocatedParseError("Unsupported POSIX collating "
+                                          "element");
               };
               # Named sets
               # Adding these may cause the charclass to close, hence the
@@ -889,11 +893,7 @@ unichar readUtf8CodePoint4c(const u8 *ts) {
                   throw LocatedParseError("Invalid POSIX named class");
               };
               '\\Q' => {
-                  // fcall readQuotedClass;
-                  ostringstream str;
-                  str << "\\Q..\\E sequences in character classes not supported at index "
-                      << ts - ptr << ".";
-                  throw ParseError(str.str());
+                  fcall readQuotedClass;
               };
               '\\E' => { /*noop*/};
               # Backspace (this is only valid for \b in char classes)
@@ -1090,28 +1090,8 @@ unichar readUtf8CodePoint4c(const u8 *ts) {
                   throwInvalidUtf8();
               };
 
-              # dot or equals at the end of a character class could be the end
-              # of a collating element, like [.blah.] or [=blah=].
-              [.=] ']' => {
-                  if (currentCls->getFirstChar() == *ts) {
-                      assert(currentClsBegin);
-                      ostringstream oss;
-                      oss << "Unsupported POSIX collating element at index "
-                          << currentClsBegin - ptr << ".";
-                      throw ParseError(oss.str());
-                  }
-                  currentCls->add(*ts);
-                  currentCls->finalize();
-                  currentSeq->addComponent(move(currentCls));
-                  inCharClass = false;
-                  fgoto main;
-              };
-
               # Literal character
               (any - ']') => {
-                  if (currentCls->class_empty()) {
-                      currentCls->setFirstChar(*ts);
-                  }
                   currentCls->add(*ts);
               };
 
@@ -1127,35 +1107,35 @@ unichar readUtf8CodePoint4c(const u8 *ts) {
     # Parser to read stuff from a character class
     #############################################################
     readClass := |*
-        # the negate and right bracket out the front are special
-        '\^' => {
+        # A caret at the beginning of the class means that the rest of the
+        # class is negated.
+        '\^' when is_early_charclass => {
             if (currentCls->isNegated()) {
+                // Already seen a caret; the second one is not a meta-character.
+                inCharClassEarly = false;
                 fhold; fgoto charClassGuts;
             } else {
                 currentCls->negate();
+                // Note: we cannot switch off inCharClassEarly here, as /[^]]/
+                // needs to use the right square bracket path below.
             }
         };
-        ']' => {
-            // if this is the first thing in the class, add it and move along,
-            // otherwise jump into the char class machine to handle what might
-            // end up as fail
-            if (currentCls->class_empty()) {
-                currentCls->add(']');
-            } else {
-                // leave it for the next machine
-                fhold;
-            }
-            fgoto charClassGuts;
+        # A right square bracket before anything "real" is interpreted as a
+        # literal right square bracket.
+        ']' when is_early_charclass => {
+            currentCls->add(']');
+            inCharClassEarly = false;
         };
         # if we hit a quote before anything "real", handle it
-        #'\\Q' => { fcall readQuotedClass; };
-        '\\Q' => {
-            throw LocatedParseError("\\Q..\\E sequences in character classes not supported");
-        };
+        '\\Q' => { fcall readQuotedClass; };
         '\\E' => { /*noop*/};
 
         # time for the real work to happen
-        any => { fhold; fgoto charClassGuts; };
+        any => {
+            inCharClassEarly = false;
+            fhold;
+            fgoto charClassGuts;
+        };
         *|;
 
     #############################################################
@@ -1183,6 +1163,7 @@ unichar readUtf8CodePoint4c(const u8 *ts) {
               # Literal character
               any => {
                   currentCls->add(*ts);
+                  inCharClassEarly = false;
               };
             *|;
 
@@ -1232,15 +1213,21 @@ unichar readUtf8CodePoint4c(const u8 *ts) {
                   throw LocatedParseError("POSIX named classes are only "
                                           "supported inside a class");
               };
+              # We don't support POSIX collating elements (neither does PCRE
+              # or Perl). These look like [.ch.] or [=ch=].
+              '\[\.' ( '\\]' | [^\]] )* '\.\]' |
+              '\[=' ( '\\]' | [^\]] )* '=\]' => {
+                  throw LocatedParseError("Unsupported POSIX collating "
+                                          "element");
+              };
               # Begin eating characters for class
               '\[' => eatClass;
               # Begin quoted literal
               '\\Q' => {
                   fgoto readQuotedLiteral;
               };
-              '\\E' => {
-                  throw LocatedParseError("Unmatched \\E");
-              };
+              # An \E that is not preceded by a \Q is ignored
+              '\\E' => { /* noop */ };
               # Match any character
               '\.' => {
                   currentSeq->addComponent(generateComponent(CLASS_ANY, false, mode));
@@ -1459,12 +1446,12 @@ unichar readUtf8CodePoint4c(const u8 *ts) {
                       // Otherwise, we interpret the first three digits as an
                       // octal escape, and the remaining characters stand for
                       // themselves as literals.
-                      const u8 *p = ts;
+                      const u8 *s = ts;
                       unsigned int accum = 0;
                       unsigned int oct_digits = 0;
-                      assert(*p == '\\'); // token starts at backslash
-                      for (++p; p < te && oct_digits < 3; ++oct_digits, ++p) {
-                          u8 digit = *p - '0';
+                      assert(*s == '\\'); // token starts at backslash
+                      for (++s; s < te && oct_digits < 3; ++oct_digits, ++s) {
+                          u8 digit = *s - '0';
                           if (digit < 8) {
                               accum = digit + accum * 8;
                           } else {
@@ -1477,8 +1464,8 @@ unichar readUtf8CodePoint4c(const u8 *ts) {
                       }
 
                       // And then the rest of the digits, if any, are literal.
-                      for (; p < te; ++p) {
-                          addLiteral(currentSeq, *p, mode);
+                      for (; s < te; ++s) {
+                          addLiteral(currentSeq, *s, mode);
                       }
                   }
               };
@@ -1895,6 +1882,11 @@ unique_ptr<Component> parse(const char *const c_ptr, ParseMode &globalMode) {
     // True if the machine is currently inside a character class, i.e. square
     // brackets [..].
     bool inCharClass = false;
+
+    // True if the machine is inside a character class but it has not processed
+    // any "real" elements yet, i.e. it's still processing meta-characters like
+    // '^'.
+    bool inCharClassEarly = false;
 
     // Location at which the current character class began.
     const u8 *currentClsBegin = p;

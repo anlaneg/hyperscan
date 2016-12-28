@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -97,7 +97,6 @@ struct mq {
                           * callback. If true, the queue must be located at a
                           * point where MO_MATCHES_PENDING was returned */
     NfaCallback cb; /**< callback to trigger on matches */
-    SomNfaCallback som_cb; /**< callback with som info;  used by haig */
     void *context; /**< context to pass along with a callback */
     struct mq_item items[MAX_MQE_LEN]; /**< queue items */
 };
@@ -196,6 +195,14 @@ static really_inline s64a q_cur_loc(const struct mq *q) {
     return q->items[q->cur].location;
 }
 
+/** \brief Returns the type of the last event in the queue. */
+static really_inline u32 q_last_type(const struct mq *q) {
+    assert(q->cur < q->end);
+    assert(q->end > 0);
+    assert(q->end <= MAX_MQE_LEN);
+    return q->items[q->end - 1].type;
+}
+
 /** \brief Returns the location (relative to the beginning of the current data
  * buffer) of the last event in the queue. */
 static really_inline s64a q_last_loc(const struct mq *q) {
@@ -269,7 +276,7 @@ void debugQueue(const struct mq *q) {
             type = "MQE_TOP_N";
             break;
         }
-        DEBUG_PRINTF("\tq[%u] %lld %d:%s\n", cur, q->items[cur].location,
+        DEBUG_PRINTF("\tq[%u] %lld %u:%s\n", cur, q->items[cur].location,
                      q->items[cur].type, type);
     }
 }

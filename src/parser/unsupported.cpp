@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -44,7 +44,8 @@ namespace ue2 {
  * an unsupported component. */
 class UnsupportedVisitor : public DefaultConstComponentVisitor {
 public:
-    ~UnsupportedVisitor();
+    ~UnsupportedVisitor() override;
+    using DefaultConstComponentVisitor::pre;
     void pre(const ComponentAssertion &) override {
         throw ParseError("Zero-width assertions are not supported.");
     }

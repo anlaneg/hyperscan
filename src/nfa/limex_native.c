@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -74,7 +74,6 @@
 static really_inline
 int processExceptional32(u32 s, u32 estate, UNUSED u32 diffmask, u32 *succ,
                          const struct LimExNFA32 *limex,
-                         const u32 *exceptionMap,
                          const struct NFAException32 *exceptions,
                          const ReportID *exReports, u64a offset,
                          struct NFAContext32 *ctx, char in_rev, char flags) {
@@ -83,7 +82,8 @@ int processExceptional32(u32 s, u32 estate, UNUSED u32 diffmask, u32 *succ,
     if (estate == ctx->cached_estate) {
         DEBUG_PRINTF("using cached succ from previous state\n");
         *succ |= ctx->cached_esucc;
-        if (ctx->cached_reports) {
+        if (ctx->cached_reports && (flags & CALLBACK_OUTPUT)) {
+            DEBUG_PRINTF("firing cached reports from previous state\n");
             if (unlikely(limexRunReports(ctx->cached_reports, ctx->callback,
                                          ctx->context, offset)
                         == MO_HALT_MATCHING)) {
@@ -103,7 +103,7 @@ int processExceptional32(u32 s, u32 estate, UNUSED u32 diffmask, u32 *succ,
 
     do {
         u32 bit = findAndClearLSB_32(&estate);
-        u32 idx = exceptionMap[bit];
+        u32 idx = rank_in_mask32(limex->exceptionMask, bit);
         const struct NFAException32 *e = &exceptions[idx];
         if (!runException32(e, s, succ, &local_succ, limex, exReports, offset,
                             ctx, &new_cache, &cacheable, in_rev, flags)) {
@@ -119,7 +119,9 @@ int processExceptional32(u32 s, u32 estate, UNUSED u32 diffmask, u32 *succ,
         ctx->cached_reports = new_cache.reports;
         ctx->cached_br = new_cache.br;
     } else if (cacheable == DO_NOT_CACHE_RESULT_AND_FLUSH_BR_ENTRIES) {
-        ctx->cached_estate = 0U;
+        if (ctx->cached_br) {
+            ctx->cached_estate = 0U;
+        }
     }
 
     return 0;
@@ -129,35 +131,4 @@ int processExceptional32(u32 s, u32 estate, UNUSED u32 diffmask, u32 *succ,
 
 #define SIZE                32
 #define STATE_T             u32
-#define SHIFT               1
-#include "limex_runtime_impl.h"
-
-#define SIZE                32
-#define STATE_T             u32
-#define SHIFT               2
-#include "limex_runtime_impl.h"
-
-#define SIZE                32
-#define STATE_T             u32
-#define SHIFT               3
-#include "limex_runtime_impl.h"
-
-#define SIZE                32
-#define STATE_T             u32
-#define SHIFT               4
-#include "limex_runtime_impl.h"
-
-#define SIZE                32
-#define STATE_T             u32
-#define SHIFT               5
-#include "limex_runtime_impl.h"
-
-#define SIZE                32
-#define STATE_T             u32
-#define SHIFT               6
-#include "limex_runtime_impl.h"
-
-#define SIZE                32
-#define STATE_T             u32
-#define SHIFT               7
 #include "limex_runtime_impl.h"

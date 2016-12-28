@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -48,6 +48,7 @@
 #include <vector>
 #include <boost/bimap.hpp>
 #include <boost/functional/hash/hash.hpp>
+#include <boost/variant.hpp>
 
 struct RoseEngine;
 
@@ -58,19 +59,20 @@ namespace ue2 {
 struct BoundaryReports;
 struct CastleProto;
 struct CompileContext;
-struct hwlmLiteral;
 class ReportManager;
+class SmallWriteBuild;
 class SomSlotManager;
 
 struct suffix_id {
     suffix_id(const RoseSuffixInfo &in)
         : g(in.graph.get()), c(in.castle.get()), d(in.rdfa.get()),
-          h(in.haig.get()), dfa_min_width(in.dfa_min_width),
+          h(in.haig.get()), t(in.tamarama.get()),
+          dfa_min_width(in.dfa_min_width),
           dfa_max_width(in.dfa_max_width) {
             assert(!g || g->kind == NFA_SUFFIX);
     }
     bool operator==(const suffix_id &b) const {
-        bool rv = g == b.g && c == b.c && h == b.h && d == b.d;
+        bool rv = g == b.g && c == b.c && h == b.h && d == b.d && t == b.t;
         assert(!rv || dfa_min_width == b.dfa_min_width);
         assert(!rv || dfa_max_width == b.dfa_max_width);
         return rv;
@@ -82,6 +84,7 @@ struct suffix_id {
         ORDER_CHECK(c);
         ORDER_CHECK(d);
         ORDER_CHECK(h);
+        ORDER_CHECK(t);
         return false;
     }
 
@@ -113,6 +116,22 @@ struct suffix_id {
         }
         return c;
     }
+    TamaProto *tamarama() {
+        if (!d && !h) {
+            assert(dfa_min_width == depth(0));
+            assert(dfa_max_width == depth::infinity());
+        }
+        return t;
+    }
+    const TamaProto *tamarama() const {
+        if (!d && !h) {
+            assert(dfa_min_width == depth(0));
+            assert(dfa_max_width == depth::infinity());
+        }
+        return t;
+    }
+
+
     raw_som_dfa *haig() { return h; }
     const raw_som_dfa *haig() const { return h; }
     raw_dfa *dfa() { return d; }
@@ -125,11 +144,14 @@ private:
     CastleProto *c;
     raw_dfa *d;
     raw_som_dfa *h;
+    TamaProto *t;
     depth dfa_min_width;
     depth dfa_max_width;
 
     friend depth findMinWidth(const suffix_id &s);
     friend depth findMaxWidth(const suffix_id &s);
+    friend depth findMinWidth(const suffix_id &s, u32 top);
+    friend depth findMaxWidth(const suffix_id &s, u32 top);
 };
 
 std::set<ReportID> all_reports(const suffix_id &s);
@@ -138,6 +160,8 @@ bool has_eod_accepts(const suffix_id &s);
 bool has_non_eod_accepts(const suffix_id &s);
 depth findMinWidth(const suffix_id &s);
 depth findMaxWidth(const suffix_id &s);
+depth findMinWidth(const suffix_id &s, u32 top);
+depth findMaxWidth(const suffix_id &s, u32 top);
 size_t hash_value(const suffix_id &s);
 
 /** \brief represents an engine to the left of a rose role */
@@ -146,7 +170,7 @@ struct left_id {
         : g(in.graph.get()), c(in.castle.get()), d(in.dfa.get()),
           h(in.haig.get()), dfa_min_width(in.dfa_min_width),
           dfa_max_width(in.dfa_max_width) {
-        assert(!g || !generates_callbacks(*g));
+        assert(!g || !has_managed_reports(*g));
     }
     bool operator==(const left_id &b) const {
         bool rv = g == b.g && c == b.c && h == b.h && d == b.d;
@@ -253,6 +277,17 @@ struct rose_literal_id {
     u32 distinctiveness;
 
     size_t elength(void) const { return s.length() + delay; }
+    size_t elength_including_mask(void) const {
+        size_t mask_len = msk.size();
+        for (u8 c : msk) {
+            if (!c) {
+                mask_len--;
+            } else {
+                break;
+            }
+        }
+        return MAX(mask_len, s.length()) + delay;
+    }
 };
 
 static inline
@@ -287,53 +322,100 @@ bool operator<(const simple_anchored_info &a, const simple_anchored_info &b) {
     return 0;
 }
 
-struct OutfixInfo { /* TODO: poly */
-    OutfixInfo() {}
-    explicit OutfixInfo(std::unique_ptr<raw_dfa> r) : rdfa(std::move(r)) {
-        assert(rdfa);
+struct MpvProto {
+    bool empty() const {
+        return puffettes.empty() && triggered_puffettes.empty();
     }
-    explicit OutfixInfo(std::unique_ptr<NGHolder> h) : holder(std::move(h)) {
-        assert(holder);
+    void reset() {
+        puffettes.clear();
+        triggered_puffettes.clear();
     }
-    explicit OutfixInfo(std::unique_ptr<raw_som_dfa> r) : haig(std::move(r)) {
-        assert(haig);
-    }
+    std::vector<raw_puff> puffettes;
+    std::vector<raw_puff> triggered_puffettes;
+};
+
+struct OutfixInfo {
+    template<class T>
+    explicit OutfixInfo(std::unique_ptr<T> x) : proto(std::move(x)) {}
+
+    explicit OutfixInfo(MpvProto mpv_in) : proto(std::move(mpv_in)) {}
 
     u32 get_queue(QueueIndexFactory &qif);
 
+    u32 get_queue() const {
+        assert(queue != ~0U);
+        return queue;
+    }
+
     bool is_nonempty_mpv() const {
-        return !puffettes.empty() || !triggered_puffettes.empty();
+        auto *m = boost::get<MpvProto>(&proto);
+        return m && !m->empty();
     }
 
     bool is_dead() const {
-        return !holder && !rdfa && !haig && puffettes.empty() &&
-               triggered_puffettes.empty();
+        auto *m = boost::get<MpvProto>(&proto);
+        if (m) {
+            return m->empty();
+        }
+        return boost::get<boost::blank>(&proto) != nullptr;
     }
 
     void clear() {
-        holder.reset();
-        rdfa.reset();
-        haig.reset();
-        puffettes.clear();
-        triggered_puffettes.clear();
-        assert(is_dead());
+        proto = boost::blank();
     }
 
-    std::unique_ptr<NGHolder> holder;
-    std::unique_ptr<raw_dfa> rdfa;
-    std::unique_ptr<raw_som_dfa> haig;
-    std::vector<raw_puff> puffettes;
-    std::vector<raw_puff> triggered_puffettes;
+    // Convenience accessor functions.
 
-    /** Once the outfix has been built into an engine, this will point to it. */
-    NFA *nfa = nullptr;
+    NGHolder *holder() {
+        auto *up = boost::get<std::unique_ptr<NGHolder>>(&proto);
+        return up ? up->get() : nullptr;
+    }
+    raw_dfa *rdfa() {
+        auto *up = boost::get<std::unique_ptr<raw_dfa>>(&proto);
+        return up ? up->get() : nullptr;
+    }
+    raw_som_dfa *haig() {
+        auto *up = boost::get<std::unique_ptr<raw_som_dfa>>(&proto);
+        return up ? up->get() : nullptr;
+    }
+    MpvProto *mpv() {
+        return boost::get<MpvProto>(&proto);
+    }
+
+    // Convenience const accessor functions.
+
+    const NGHolder *holder() const {
+        auto *up = boost::get<std::unique_ptr<NGHolder>>(&proto);
+        return up ? up->get() : nullptr;
+    }
+    const raw_dfa *rdfa() const {
+        auto *up = boost::get<std::unique_ptr<raw_dfa>>(&proto);
+        return up ? up->get() : nullptr;
+    }
+    const raw_som_dfa *haig() const {
+        auto *up = boost::get<std::unique_ptr<raw_som_dfa>>(&proto);
+        return up ? up->get() : nullptr;
+    }
+    const MpvProto *mpv() const {
+        return boost::get<MpvProto>(&proto);
+    }
+
+    /**
+     * \brief Variant wrapping the various engine types. If this is
+     * boost::blank, it means that this outfix is unused (dead).
+     */
+    boost::variant<
+        boost::blank,
+        std::unique_ptr<NGHolder>,
+        std::unique_ptr<raw_dfa>,
+        std::unique_ptr<raw_som_dfa>,
+        MpvProto> proto = boost::blank();
 
     RevAccInfo rev_info;
     u32 maxBAWidth = 0; //!< max bi-anchored width
     depth minWidth = depth::infinity();
     depth maxWidth = 0;
     u64a maxOffset = 0;
-    bool chained = false;
     bool in_sbmatcher = false; //!< handled by small-block matcher.
 
 private:
@@ -345,7 +427,7 @@ std::set<ReportID> all_reports(const OutfixInfo &outfix);
 // Concrete impl class
 class RoseBuildImpl : public RoseBuild {
 public:
-    RoseBuildImpl(ReportManager &rm, SomSlotManager &ssm,
+    RoseBuildImpl(ReportManager &rm, SomSlotManager &ssm, SmallWriteBuild &smwr,
                   const CompileContext &cc, const BoundaryReports &boundary);
 
     ~RoseBuildImpl() override;
@@ -385,14 +467,8 @@ public:
 
     std::unique_ptr<RoseDedupeAux> generateDedupeAux() const override;
 
-    bool hasEodSideLink() const;
-
     // Find the maximum bound on the edges to this vertex's successors.
     u32 calcSuccMaxBound(RoseVertex u) const;
-
-    // Assign roles to groups, writing the groups bitset into each role in the
-    // graph.
-    void assignGroupsToRoles();
 
     /* Returns the ID of the given literal in the literal map, adding it if
      * necessary. */
@@ -411,7 +487,6 @@ public:
 
     // Is the Rose anchored?
     bool hasNoFloatingRoots() const;
-    bool hasDirectReports() const;
 
     RoseVertex cloneVertex(RoseVertex v);
 
@@ -426,8 +501,6 @@ public:
     bool hasLiteralInTable(RoseVertex v, enum rose_literal_table t) const;
     bool hasAnchoredTablePred(RoseVertex v) const;
 
-    void assignGroupsToLiterals(void);
-
     // Is the given vertex a successor of either root or anchored_root?
     bool isRootSuccessor(const RoseVertex &v) const;
     /* Is the given vertex a successor of something other than root or
@@ -436,8 +509,7 @@ public:
 
     bool isDirectReport(u32 id) const;
     bool isDelayed(u32 id) const;
-    bool hasDirectFinalId(u32 id) const;
-    bool hasDirectFinalId(RoseVertex v) const;
+
     bool hasFinalId(u32 id) const;
 
     bool isAnchored(RoseVertex v) const; /* true iff has literal in anchored
@@ -487,15 +559,17 @@ public:
     std::map<size_t, std::vector<std::unique_ptr<raw_dfa>>> anchored_nfas;
     std::map<simple_anchored_info, std::set<u32>> anchored_simple;
     std::map<u32, std::set<u32> > group_to_literal;
-    u32 group_weak_end;
     u32 group_end;
-
-    std::map<CharReach, std::set<RoseVertex> > side_squash_roles;
 
     u32 anchored_base_id;
 
-    u32 nonbenefits_base_id;
     u32 ematcher_region_size; /**< number of bytes the eod table runs over */
+
+    /** \brief Mapping from leftfix to queue ID (used in dump code). */
+    unordered_map<left_id, u32> leftfix_queue_map;
+
+    /** \brief Mapping from suffix to queue ID (used in dump code). */
+    unordered_map<suffix_id, u32> suffix_queue_map;
 
     /** \brief Mapping from anchored literal ID to the original literal suffix
      * present when the literal was added to the literal matcher. Used for
@@ -515,19 +589,14 @@ public:
      * null again). */
     std::unique_ptr<OutfixInfo> mpv_outfix = nullptr;
 
-    bool floating_direct_report;
-
     u32 eod_event_literal_id; // ID of EOD event literal, or MO_INVALID_IDX.
 
     u32 max_rose_anchored_floating_overlap;
 
-    /** \brief Flattened list of report IDs for multi-direct reports, indexed
-     * by MDR final_id. */
-    std::vector<ReportID> mdr_reports;
-
     QueueIndexFactory qif;
     ReportManager &rm;
     SomSlotManager &ssm;
+    SmallWriteBuild &smwr;
     const BoundaryReports &boundary;
 
 private:
@@ -540,6 +609,9 @@ bool hasAnchHistorySucc(const RoseGraph &g, RoseVertex v);
 bool hasLastByteHistorySucc(const RoseGraph &g, RoseVertex v);
 
 size_t maxOverlap(const rose_literal_id &a, const rose_literal_id &b);
+ue2_literal findNonOverlappingTail(const std::set<ue2_literal> &lits,
+                                   const ue2_literal &s);
+
 void setReportId(NGHolder &g, ReportID id);
 
 #ifndef NDEBUG
@@ -553,13 +625,6 @@ u64a findMaxOffset(const std::set<ReportID> &reports, const ReportManager &rm);
 // literal.
 void normaliseLiteralMask(const ue2_literal &s, std::vector<u8> &msk,
                           std::vector<u8> &cmp);
-
-void fillHamsterLiteralList(const RoseBuildImpl &tbi, rose_literal_table table,
-                            std::vector<hwlmLiteral> *hl);
-
-// Find the minimum depth in hops of each role. Note that a role may be
-// accessible from both the root and the anchored root.
-std::map<RoseVertex, u32> findDepths(const RoseBuildImpl &build);
 
 #ifndef NDEBUG
 bool canImplementGraphs(const RoseBuildImpl &tbi);

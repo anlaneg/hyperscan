@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -33,35 +33,32 @@
 #ifndef ROSE_RUNTIME_H
 #define ROSE_RUNTIME_H
 
-#include "scratch.h"
 #include "rose_internal.h"
-#include "util/exhaust.h" // for isExhausted
-#include "util/internal_report.h"
+#include "scratch.h"
 #include "util/partial_store.h"
 
 /*
  * ROSE STATE LAYOUT:
- *   state multibit
- *   runtime state structure
- *   full history table
- *   last history table
- *   short history table
- *   short queues (two multibits)
- *   last queues (two multibits)
- *   active array
- *   delay rb dirty
- *   nfa state
+ *
+ * - runtime status byte (halt status, delay rebuild dirty, etc)
+ * - rose state multibit
+ * - active leaf array (multibit)
+ * - active leftfix array (multibit)
+ * - leftfix lag table
+ * - anchored matcher state
+ * - literal groups
+ * - history buffer
+ * - exhausted bitvector
+ * - som slots, som multibit arrays
+ * - nfa stream state (for each nfa)
  */
 
 #define rose_inline really_inline
 
-/** \brief Fetch runtime state ptr. */
-static really_inline
-struct RoseRuntimeState *getRuntimeState(u8 *state) {
-    struct RoseRuntimeState *rs = (struct RoseRuntimeState *)(state);
-    assert(ISALIGNED_N(rs, 8));
-    return rs;
-}
+/* Maximum offset that we will eagerly run prefixes to. Beyond this point, eager
+ * prefixes are always run in exactly the same way as normal prefixes. */
+#define EAGER_STOP_OFFSET 64
+
 
 static really_inline
 const void *getByOffset(const struct RoseEngine *t, u32 offset) {
@@ -70,118 +67,55 @@ const void *getByOffset(const struct RoseEngine *t, u32 offset) {
 }
 
 static really_inline
-void *getRoleState(u8 *state) {
-    return state + sizeof(struct RoseRuntimeState);
+void *getRoleState(char *state) {
+    return state + sizeof(u8); // status flags
 }
 
 /** \brief Fetch the active array for suffix nfas. */
 static really_inline
-u8 *getActiveLeafArray(const struct RoseEngine *t, u8 *state) {
-    return state + t->stateOffsets.activeLeafArray;
+u8 *getActiveLeafArray(const struct RoseEngine *t, char *state) {
+    return (u8 *)(state + t->stateOffsets.activeLeafArray);
 }
 
 /** \brief Fetch the active array for rose nfas. */
 static really_inline
-u8 *getActiveLeftArray(const struct RoseEngine *t, u8 *state) {
-    return state + t->stateOffsets.activeLeftArray;
+u8 *getActiveLeftArray(const struct RoseEngine *t, char *state) {
+    return (u8 *)(state + t->stateOffsets.activeLeftArray);
 }
 
 static really_inline
-const u32 *getAnchoredInverseMap(const struct RoseEngine *t) {
-    return (const u32 *)(((const u8 *)t) + t->anchoredReportInverseMapOffset);
-}
-
-static really_inline
-const u32 *getAnchoredMap(const struct RoseEngine *t) {
-    return (const u32 *)(((const u8 *)t) + t->anchoredReportMapOffset);
-}
-
-static really_inline
-rose_group loadGroups(const struct RoseEngine *t, const u8 *state) {
+rose_group loadGroups(const struct RoseEngine *t, const char *state) {
     return partial_load_u64a(state + t->stateOffsets.groups,
                              t->stateOffsets.groups_size);
 
 }
 
 static really_inline
-void storeGroups(const struct RoseEngine *t, u8 *state, rose_group groups) {
+void storeGroups(const struct RoseEngine *t, char *state, rose_group groups) {
     partial_store_u64a(state + t->stateOffsets.groups, groups,
                        t->stateOffsets.groups_size);
 }
 
 static really_inline
-u8 * getFloatingMatcherState(const struct RoseEngine *t, u8 *state) {
-    return state + t->stateOffsets.floatingMatcherState;
+u8 *getFloatingMatcherState(const struct RoseEngine *t, char *state) {
+    return (u8 *)(state + t->stateOffsets.floatingMatcherState);
 }
 
 static really_inline
-u8 *getLeftfixLagTable(const struct RoseEngine *t, u8 *state) {
-    return state + t->stateOffsets.leftfixLagTable;
+u8 *getLeftfixLagTable(const struct RoseEngine *t, char *state) {
+    return (u8 *)(state + t->stateOffsets.leftfixLagTable);
 }
 
 static really_inline
-const u8 *getLeftfixLagTableConst(const struct RoseEngine *t, const u8 *state) {
-    return state + t->stateOffsets.leftfixLagTable;
-}
-
-static rose_inline
-char roseSuffixInfoIsExhausted(const struct RoseEngine *t,
-                               const struct NfaInfo *info,
-                               const char *exhausted) {
-    if (!info->ekeyListOffset) {
-        return 0;
-    }
-
-    DEBUG_PRINTF("check exhaustion -> start at %u\n", info->ekeyListOffset);
-
-    /* END_EXHAUST terminated list */
-    const u32 *ekeys = (const u32 *)((const char *)t + info->ekeyListOffset);
-    while (*ekeys != END_EXHAUST) {
-        DEBUG_PRINTF("check %u\n", *ekeys);
-        if (!isExhausted(exhausted, *ekeys)) {
-            DEBUG_PRINTF("not exhausted -> alive\n");
-            return 0;
-        }
-        ++ekeys;
-    }
-
-    DEBUG_PRINTF("all ekeys exhausted -> dead\n");
-    return 1;
-}
-
-static really_inline
-char roseSuffixIsExhausted(const struct RoseEngine *t, u32 qi,
-                           const char *exhausted) {
-    DEBUG_PRINTF("check queue %u\n", qi);
-    const struct NfaInfo *info = getNfaInfoByQueue(t, qi);
-    return roseSuffixInfoIsExhausted(t, info, exhausted);
+const u8 *getLeftfixLagTableConst(const struct RoseEngine *t,
+                                  const char *state) {
+    return (const u8 *)(state + t->stateOffsets.leftfixLagTable);
 }
 
 static really_inline
 u32 has_chained_nfas(const struct RoseEngine *t) {
     return t->outfixBeginQueue;
 }
-
-/** \brief Fetch \ref internal_report structure for this internal ID. */
-static really_inline
-const struct internal_report *getInternalReport(const struct RoseEngine *t,
-                                                ReportID intId) {
-    const struct internal_report *reports =
-        (const struct internal_report *)((const u8 *)t + t->intReportOffset);
-    assert(intId < t->intReportCount);
-    return reports + intId;
-}
-
-static really_inline
-const struct RoseRole *getRoleByOffset(const struct RoseEngine *t, u32 offset) {
-        const struct RoseRole *tr = (const void *)((const char *)t + offset);
-
-        assert((size_t)(tr - getRoleTable(t)) < t->roleCount);
-        DEBUG_PRINTF("get root role %zu\n", tr - getRoleTable(t));
-        return tr;
-}
-
-#define ANCHORED_MATCH_SENTINEL (~0U)
 
 static really_inline
 void updateLastMatchOffset(struct RoseContext *tctxt, u64a offset) {

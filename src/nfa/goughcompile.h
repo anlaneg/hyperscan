@@ -70,8 +70,11 @@ struct dstate_som {
 };
 
 struct raw_som_dfa : public raw_dfa {
-    raw_som_dfa(nfa_kind k, bool unordered_som_triggers_in)
-        : raw_dfa(k), unordered_som_triggers(unordered_som_triggers_in) {
+    raw_som_dfa(nfa_kind k, bool unordered_som_triggers_in, u32 trigger,
+                u32 stream_som_loc_width_in)
+        : raw_dfa(k), stream_som_loc_width(stream_som_loc_width_in),
+        unordered_som_triggers(unordered_som_triggers_in),
+        trigger_nfa_state(trigger) {
         assert(!unordered_som_triggers || is_triggered(kind));
     }
 
@@ -86,7 +89,8 @@ struct raw_som_dfa : public raw_dfa {
 };
 
 aligned_unique_ptr<NFA> goughCompile(raw_som_dfa &raw, u8 somPrecision,
-                                     const CompileContext &cc);
+                                     const CompileContext &cc,
+                                     const ReportManager &rm);
 
 } // namespace ue2
 

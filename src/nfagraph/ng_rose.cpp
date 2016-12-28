@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -750,7 +750,7 @@ unique_ptr<VertLitInfo> LitCollection::pickNext() {
         for (auto v : lits.back()->vv) {
             if (contains(poisoned, v)) {
                 DEBUG_PRINTF("skipping '%s' as overlapped\n",
-                     ((const string &)*lits.back()->lit.begin()).c_str());
+                             dumpString(*(lits.back()->lit.begin())).c_str());
                 lits.pop_back();
                 goto next_lit;
             }
@@ -760,7 +760,7 @@ unique_ptr<VertLitInfo> LitCollection::pickNext() {
         lits.pop_back();
         poisonCandidates(*rv);
         DEBUG_PRINTF("best is '%s' %u a%d t%d\n",
-                     ((const string &)*rv->lit.begin()).c_str(),
+                     dumpString(*(rv->lit.begin())).c_str(),
                      g[rv->vv.front()].index,
                      (int)createsAnchoredLHS(g, rv->vv, depths, grey),
                      (int)createsTransientLHS(g, rv->vv, depths, grey));
@@ -771,51 +771,6 @@ unique_ptr<VertLitInfo> LitCollection::pickNext() {
     return nullptr;
 }
 
-}
-
-/** \brief Returns true if the given literal is the only thing in the graph,
- * from start to accept. */
-static
-bool literalIsWholeGraph(const NGHolder &g, const ue2_literal &lit) {
-    NFAVertex v = g.accept;
-
-    for (auto it = lit.rbegin(), ite = lit.rend(); it != ite; ++it) {
-        NFAGraph::inv_adjacency_iterator ai, ae;
-        tie(ai, ae) = inv_adjacent_vertices(v, g);
-        if (ai == ae) {
-            assert(0); // no predecessors?
-            return false;
-        }
-        v = *ai++;
-        if (ai != ae) {
-            DEBUG_PRINTF("branch, fail\n");
-            return false;
-        }
-
-        if (is_special(v, g)) {
-            DEBUG_PRINTF("special found, fail\n");
-            return false;
-        }
-
-        const CharReach &cr = g[v].char_reach;
-        if (cr != *it) {
-            DEBUG_PRINTF("reach fail\n");
-            return false;
-        }
-    }
-
-    // Our last value for v should have only start states for predecessors.
-    for (auto u : inv_adjacent_vertices_range(v, g)) {
-        if (!is_any_start(u, g)) {
-            DEBUG_PRINTF("pred is not start\n");
-            return false;
-        }
-    }
-
-    assert(num_vertices(g) == lit.length() + N_SPECIALS);
-
-    DEBUG_PRINTF("ok\n");
-    return true;
 }
 
 static
@@ -860,7 +815,7 @@ u32 removeTrailingLiteralStates(NGHolder &g, const ue2_literal &lit,
         max_delay--;
     }
 
-    DEBUG_PRINTF("killing off '%s'\n", ((const string &)lit).c_str());
+    DEBUG_PRINTF("killing off '%s'\n", dumpString(lit).c_str());
     set<NFAVertex> curr, next;
     curr.insert(g.accept);
 
@@ -917,6 +872,7 @@ u32 removeTrailingLiteralStates(NGHolder &g, const ue2_literal &lit,
     }
 
     clear_in_edges(g.accept, g);
+    clearReports(g);
 
     vector<NFAVertex> verts(pred.begin(), pred.end());
     sort(verts.begin(), verts.end(), VertexIndexOrdering<NGHolder>(g));
@@ -933,19 +889,10 @@ u32 removeTrailingLiteralStates(NGHolder &g, const ue2_literal &lit,
     return delay;
 }
 
-static
 void restoreTrailingLiteralStates(NGHolder &g, const ue2_literal &lit,
-                                  u32 delay) {
+                                  u32 delay, const vector<NFAVertex> &preds) {
     assert(delay <= lit.length());
-    DEBUG_PRINTF("adding on '%s' %u\n", ((const string &)lit).c_str(), delay);
-
-    vector<NFAVertex> preds;
-    insert(&preds, preds.end(), inv_adjacent_vertices(g.accept, g));
-    clear_in_edges(g.accept, g);
-
-    for (auto v : preds) {
-        g[v].reports.clear(); /* clear report from old accepts */
-    }
+    DEBUG_PRINTF("adding on '%s' %u\n", dumpString(lit).c_str(), delay);
 
     NFAVertex prev = g.accept;
     auto it = lit.rbegin();
@@ -970,6 +917,19 @@ void restoreTrailingLiteralStates(NGHolder &g, const ue2_literal &lit,
     g.renumberVertices();
     g.renumberEdges();
     assert(allMatchStatesHaveReports(g));
+}
+
+void restoreTrailingLiteralStates(NGHolder &g, const ue2_literal &lit,
+                                  u32 delay) {
+    vector<NFAVertex> preds;
+    insert(&preds, preds.end(), inv_adjacent_vertices(g.accept, g));
+    clear_in_edges(g.accept, g);
+
+    for (auto v : preds) {
+        g[v].reports.clear(); /* clear report from old accepts */
+    }
+
+    restoreTrailingLiteralStates(g, lit, delay, preds);
 }
 
 /* return false if we should get rid of the edge altogether */
@@ -1505,16 +1465,10 @@ bool splitRoseEdge(RoseInGraph &ig, const VertLitInfo &split,
 }
 
 static
-bool isStarCliche(const NGHolder &g, const ue2_literal &succ_lit,
-                  const Grey &grey, CharReach *escapes_out) {
+bool isStarCliche(const NGHolder &g) {
     DEBUG_PRINTF("checking graph with %zu vertices\n", num_vertices(g));
 
     bool nonspecials_seen = false;
-    CharReach escapes;
-
-    // Escapes are only available if we have the Sidecar engine available to
-    // implement them.
-    const u32 max_escapes = grey.allowSidecar ? MAX_ESCAPE_CHARS : 0;
 
     for (auto v : vertices_range(g)) {
         if (is_special(v, g)) {
@@ -1526,8 +1480,7 @@ bool isStarCliche(const NGHolder &g, const ue2_literal &succ_lit,
         }
         nonspecials_seen = true;
 
-        escapes = ~g[v].char_reach;
-        if (escapes.count() > max_escapes) {
+        if (!g[v].char_reach.all()) {
             return false;
         }
 
@@ -1547,14 +1500,6 @@ bool isStarCliche(const NGHolder &g, const ue2_literal &succ_lit,
         return false;
     }
 
-    /* we need to check that succ lit does not intersect with the escapes. */
-    for (const auto &c : succ_lit) {
-        if ((escapes & c).any()) {
-            return false;
-        }
-    }
-
-    *escapes_out = escapes;
     return true;
 }
 
@@ -1620,16 +1565,13 @@ void processInfixes(RoseInGraph &ig, const CompileContext &cc) {
 
         if (delay != max_allowed_delay) {
             restoreTrailingLiteralStates(*h_new, lit2, delay);
-            delay = removeTrailingLiteralStates(*h_new, lit2,
-                                                max_allowed_delay);
+            delay = removeTrailingLiteralStates(*h_new, lit2, max_allowed_delay);
         }
 
-        CharReach escapes;
-        if (isStarCliche(*h_new, lit2, cc.grey, &escapes)) {
+        if (isStarCliche(*h_new)) {
             DEBUG_PRINTF("is a X star!\n");
             ig[e].graph.reset();
             ig[e].graph_lag = 0;
-            ig[e].escapes = escapes;
         } else {
             ig[e].graph = move(h_new);
             ig[e].graph_lag = delay;
@@ -1842,9 +1784,6 @@ bool doNetflowCut(RoseInGraph &ig, const vector<RoseInEdge> &to_cut,
         set<ue2_literal> lits = getLiteralSet(h, e);
         compressAndScore(lits);
         cut_lits[e] = lits;
-
-        DEBUG_PRINTF("cut lit '%s'\n",
-                     ((const string &)*cut_lits[e].begin()).c_str());
     }
 
     /* if literals are underlength bail or if it involves a forbidden edge*/
@@ -2263,7 +2202,7 @@ bool improveLHS(RoseInGraph &ig, const vector<RoseInEdge> &edges,
         const vector<RoseInEdge> &local = by_src[v];
 
         vector<NGHolder *> graphs;
-        map<RoseInVertex, vector<RoseInEdge> > by_graph;
+        map<NGHolder *, vector<RoseInEdge> > by_graph;
         for (const auto &e : local) {
             NGHolder *gp = ig[e].graph.get();
             if (!contains(by_graph, gp)) {
@@ -2410,7 +2349,6 @@ static
 void makeNocaseWithPrefixMask(RoseInGraph &g, RoseInVertex v) {
     for (const auto &e : in_edges_range(v, g)) {
         const RoseInVertex u = source(e, g);
-        CharReach &escapes = g[e].escapes;
 
         if (!g[e].graph) {
             g[e].graph = make_shared<NGHolder>(whatRoseIsThis(g, e));
@@ -2420,17 +2358,13 @@ void makeNocaseWithPrefixMask(RoseInGraph &g, RoseInVertex v) {
             assert(!g[e].maxBound || g[e].maxBound == ROSE_BOUND_INF);
 
             if (g[u].type == RIV_START) {
-                assert(escapes.none());
                 add_edge(h.startDs, h.accept, h);
                 h[h.startDs].reports.insert(0);
             } else if (g[e].maxBound == ROSE_BOUND_INF) {
                 add_edge(h.start, h.accept, h);
                 NFAVertex ds = add_vertex(h);
 
-                // Cyclic vertex which takes over handling the escapes inside
-                // the prefix graph.
-                h[ds].char_reach = ~escapes;
-                escapes.clear();
+                h[ds].char_reach = CharReach::dot();
 
                 add_edge(h.start, ds, h);
                 add_edge(ds, ds, h);
@@ -2438,7 +2372,6 @@ void makeNocaseWithPrefixMask(RoseInGraph &g, RoseInVertex v) {
                 h[h.start].reports.insert(0);
                 h[ds].reports.insert(0);
             } else {
-                assert(escapes.none());
                 add_edge(h.start, h.accept, h);
                 h[h.start].reports.insert(0);
             }

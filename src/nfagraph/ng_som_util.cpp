@@ -136,7 +136,7 @@ bool firstMatchIsFirst(const NGHolder &p) {
         return false;
     }
 
-    set<NFAVertex> states;
+    ue2::flat_set<NFAVertex> states;
     /* turn on all states (except starts - avoid suffix matches) */
     /* If we were doing (1) we would also except states leading to accepts -
        avoid prefix matches */
@@ -149,7 +149,7 @@ bool firstMatchIsFirst(const NGHolder &p) {
     }
 
     /* run the prefix the main graph */
-    execute_graph(p, p, &states);
+    states = execute_graph(p, p, states);
 
     for (auto v : states) {
         /* need to check if this vertex may represent an infix match - ie
@@ -186,8 +186,7 @@ bool somMayGoBackwards(NFAVertex u, const NGHolder &g,
         return cache.smgb[u];
     }
 
-    DEBUG_PRINTF("checking if som can go backwards on %u\n",
-                  g[u].index);
+    DEBUG_PRINTF("checking if som can go backwards on %u\n", g[u].index);
 
     set<NFAEdge> be;
     BackEdges<set<NFAEdge>> backEdgeVisitor(be);
@@ -224,6 +223,7 @@ bool somMayGoBackwards(NFAVertex u, const NGHolder &g,
     NGHolder c_g;
     cloneHolder(c_g, g, &orig_to_copy);
 
+    /* treat virtual starts as unconditional - wire to startDs instead */
     for (NFAVertex v : vertices_range(g)) {
         if (!is_virtual_start(v, g)) {
             continue;
@@ -236,6 +236,7 @@ bool somMayGoBackwards(NFAVertex u, const NGHolder &g,
         clear_vertex(c_v, c_g);
     }
 
+    /* treat u as the only accept state */
     NFAVertex c_u = orig_to_copy[u];
     clear_in_edges(c_g.acceptEod, c_g);
     add_edge(c_g.accept, c_g.acceptEod, c_g);
@@ -256,7 +257,9 @@ bool somMayGoBackwards(NFAVertex u, const NGHolder &g,
         }
         for (auto v : adjacent_vertices_range(t, g)) {
             if (contains(u_succ, v)) {
-                add_edge(orig_to_copy[t], c_g.accept, c_g);
+                /* due to virtual starts being aliased with normal starts in the
+                 * copy of the graph, we may have already added the edges. */
+                add_edge_if_not_present(orig_to_copy[t], c_g.accept, c_g);
                 break;
             }
         }
@@ -313,7 +316,7 @@ bool sentClearsTail(const NGHolder &g,
      */
 
     u32 first_bad_region = ~0U;
-    set<NFAVertex> states;
+    ue2::flat_set<NFAVertex> states;
     /* turn on all states */
     DEBUG_PRINTF("region %u is cutover\n", last_head_region);
     for (auto v : vertices_range(g)) {
@@ -327,7 +330,7 @@ bool sentClearsTail(const NGHolder &g,
     }
 
     /* run the prefix the main graph */
-    execute_graph(g, sent, &states);
+    states = execute_graph(g, sent, states);
 
     /* .. and check if we are left with anything in the tail region */
     for (auto v : states) {

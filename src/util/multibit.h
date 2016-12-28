@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Intel Corporation
+ * Copyright (c) 2015-2016, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -235,18 +235,18 @@ const u8 *mmbit_get_level_root_const(const u8 *bits, u32 level) {
 /** \brief get the block for this key on the current level as a u8 ptr */
 static really_inline
 u8 *mmbit_get_block_ptr(u8 *bits, u32 max_level, u32 level, u32 key) {
-    return mmbit_get_level_root(bits, level) +
-           (key >> (mmbit_get_ks(max_level, level) + MMB_KEY_SHIFT)) *
-               sizeof(MMB_TYPE);
+    u8 *level_root = mmbit_get_level_root(bits, level);
+    u32 ks = mmbit_get_ks(max_level, level);
+    return level_root + ((u64a)key >> (ks + MMB_KEY_SHIFT)) * sizeof(MMB_TYPE);
 }
 
 /** \brief get the block for this key on the current level as a const u8 ptr */
 static really_inline
 const u8 *mmbit_get_block_ptr_const(const u8 *bits, u32 max_level, u32 level,
                                     u32 key) {
-    return mmbit_get_level_root_const(bits, level) +
-           (key >> (mmbit_get_ks(max_level, level) + MMB_KEY_SHIFT)) *
-               sizeof(MMB_TYPE);
+    const u8 *level_root = mmbit_get_level_root_const(bits, level);
+    u32 ks = mmbit_get_ks(max_level, level);
+    return level_root + ((u64a)key >> (ks + MMB_KEY_SHIFT)) * sizeof(MMB_TYPE);
 }
 
 /** \brief get the _byte_ for this key on the current level as a u8 ptr */
@@ -254,7 +254,7 @@ static really_inline
 u8 *mmbit_get_byte_ptr(u8 *bits, u32 max_level, u32 level, u32 key) {
     u8 *level_root = mmbit_get_level_root(bits, level);
     u32 ks = mmbit_get_ks(max_level, level);
-    return level_root + (key >> (ks + MMB_KEY_SHIFT - 3));
+    return level_root + ((u64a)key >> (ks + MMB_KEY_SHIFT - 3));
 }
 
 /** \brief get our key value for the current level */
@@ -665,6 +665,84 @@ char mmbit_any_precise(const u8 *bits, u32 total_bits) {
 }
 
 static really_inline
+char mmbit_all_flat(const u8 *bits, u32 total_bits) {
+    while (total_bits > MMB_KEY_BITS) {
+        if (mmb_load(bits) != MMB_ALL_ONES) {
+            return 0;
+        }
+        bits += sizeof(MMB_TYPE);
+        total_bits -= MMB_KEY_BITS;
+    }
+    while (total_bits > 8) {
+        if (*bits != 0xff) {
+            return 0;
+        }
+        bits++;
+        total_bits -= 8;
+    }
+    u8 mask = (u8)mmb_mask_zero_to_nocheck(total_bits);
+    return (*bits & mask) == mask;
+}
+
+static really_inline
+char mmbit_all_big(const u8 *bits, u32 total_bits) {
+    u32 ks = mmbit_keyshift(total_bits);
+
+    u32 level = 0;
+    for (;;) {
+        // Number of bits we expect to see switched on on this level.
+        u32 level_bits;
+        if (ks != 0) {
+            u32 next_level_width = MMB_KEY_BITS << (ks - MMB_KEY_SHIFT);
+            level_bits = ROUNDUP_N(total_bits, next_level_width) >> ks;
+        } else {
+            level_bits = total_bits;
+        }
+
+        const u8 *block_ptr = mmbit_get_level_root_const(bits, level);
+
+        // All full-size blocks should be all-ones.
+        while (level_bits >= MMB_KEY_BITS) {
+            MMB_TYPE block = mmb_load(block_ptr);
+            if (block != MMB_ALL_ONES) {
+                return 0;
+            }
+            block_ptr += sizeof(MMB_TYPE);
+            level_bits -= MMB_KEY_BITS;
+        }
+
+        // If we have bits remaining, we have a runt block on the end.
+        if (level_bits > 0) {
+            MMB_TYPE block = mmb_load(block_ptr);
+            MMB_TYPE mask = mmb_mask_zero_to_nocheck(level_bits);
+            if ((block & mask) != mask) {
+                return 0;
+            }
+        }
+
+        if (ks == 0) {
+            break;
+        }
+
+        ks -= MMB_KEY_SHIFT;
+        level++;
+    }
+
+    return 1;
+}
+
+/** \brief True if all keys are on. Guaranteed precise. */
+static really_inline
+char mmbit_all(const u8 *bits, u32 total_bits) {
+    MDEBUG_PRINTF("%p total_bits %u\n", bits, total_bits);
+
+    if (mmbit_is_flat_model(total_bits)) {
+        return mmbit_all_flat(bits, total_bits);
+    }
+    return mmbit_all_big(bits, total_bits);
+}
+
+static really_inline
 MMB_TYPE get_flat_masks(u32 base, u32 it_start, u32 it_end) {
     if (it_end <= base) {
         return 0;
@@ -721,11 +799,11 @@ u32 mmbit_iterate_bounded_flat(const u8 *bits, u32 total_bits, u32 begin,
 }
 
 static really_inline
-MMB_TYPE get_lowhi_masks(u32 level, u32 max_level, u32 block_min, u32 block_max,
-                         u32 block_base) {
+MMB_TYPE get_lowhi_masks(u32 level, u32 max_level, u64a block_min, u64a block_max,
+                         u64a block_base) {
     const u32 level_shift = (max_level - level) * MMB_KEY_SHIFT;
-    u32 lshift = (block_min - block_base) >> level_shift;
-    u32 ushift = (block_max - block_base) >> level_shift;
+    u64a lshift = (block_min - block_base) >> level_shift;
+    u64a ushift = (block_max - block_base) >> level_shift;
     MMB_TYPE lmask = lshift < 64 ? ~mmb_mask_zero_to_nocheck(lshift) : 0;
     MMB_TYPE umask =
         ushift < 63 ? mmb_mask_zero_to_nocheck(ushift + 1) : MMB_ALL_ONES;
@@ -734,7 +812,7 @@ MMB_TYPE get_lowhi_masks(u32 level, u32 max_level, u32 block_min, u32 block_max,
 
 static really_inline
 u32 mmbit_iterate_bounded_big(const u8 *bits, u32 total_bits, u32 it_start, u32 it_end) {
-    u32 key = 0;
+    u64a key = 0;
     u32 ks = mmbit_keyshift(total_bits);
     const u32 max_level = mmbit_maxlevel_from_keyshift(ks);
     u32 level = 0;
@@ -742,10 +820,10 @@ u32 mmbit_iterate_bounded_big(const u8 *bits, u32 total_bits, u32 it_start, u32 
     for (;;) {
         assert(level <= max_level);
 
-        u32 block_width = MMB_KEY_BITS << ks;
-        u32 block_base = key*block_width;
-        u32 block_min = MAX(it_start, block_base);
-        u32 block_max = MIN(it_end, block_base + block_width - 1);
+        u64a block_width = MMB_KEY_BITS << ks;
+        u64a block_base = key * block_width;
+        u64a block_min = MAX(it_start, block_base);
+        u64a block_max = MIN(it_end, block_base + block_width - 1);
         const u8 *block_ptr =
             mmbit_get_level_root_const(bits, level) + key * sizeof(MMB_TYPE);
         MMB_TYPE block = mmb_load(block_ptr);
@@ -761,13 +839,14 @@ u32 mmbit_iterate_bounded_big(const u8 *bits, u32 total_bits, u32 it_start, u32 
             // No bit found, go up a level
             // we know that this block didn't have any answers, so we can push
             // our start iterator forward.
-            it_start = block_base + block_width;
-            if (it_start > it_end) {
+            u64a next_start = block_base + block_width;
+            if (next_start > it_end) {
                 break;
             }
             if (level-- == 0) {
                 break;
             }
+            it_start = next_start;
             key >>= MMB_KEY_SHIFT;
             ks += MMB_KEY_SHIFT;
         }
